@@ -75,7 +75,7 @@ verify_tool_inputs() {
     [[ -n "$tools_rg" && -x "$tools_rg" ]] || fail "GROK_TOOLS_BUNDLE_RG_PATH is required"
     [[ -n "$shell_rg" && -x "$shell_rg" ]] || fail "GROK_SHELL_BUNDLE_RG_PATH is required"
     cmp -s "$tools_rg" "$shell_rg" || fail "tools and shell must bundle the same ripgrep binary"
-    [[ "$("$tools_rg" --version | sed -n '1p')" == "$EXPECTED_RG_VERSION" ]] ||
+    [[ "$("$tools_rg" --version | awk 'NR == 1 { print $1 " " $2 }')" == "$EXPECTED_RG_VERSION" ]] ||
         fail "release builds require ${EXPECTED_RG_VERSION}"
     grep -Eq 'Machine:[[:space:]]+AArch64' <<<"$(readelf -h "$tools_rg")" ||
         fail "bundled ripgrep is not AArch64"
