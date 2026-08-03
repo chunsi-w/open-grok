@@ -331,7 +331,7 @@ impl AgentView {
     /// keep their in-overlay meaning. Dashboard-overlay only; the overlay
     /// stays pending (no answer sent).
     pub(crate) fn overlay_esc_backs_out(&self) -> bool {
-        use crate::views::question_view::{LocalQuestionKind, QuestionFocus};
+        use crate::views::question_view::QuestionFocus;
         if !self.in_dashboard_overlay {
             return false;
         }
@@ -345,7 +345,6 @@ impl AgentView {
             return self.active_pane != AgentPane::Scrollback
                 && qv.focus == QuestionFocus::Navigation
                 && qv.active_tab == 0
-                && !matches!(qv.local_kind, Some(LocalQuestionKind::ProjectSelect { .. }))
                 && !qv.active_tab_has_selection();
         }
         false
@@ -926,6 +925,7 @@ impl AgentView {
                                     perm.active_idx = idx;
                                     perm.focus =
                                         crate::views::permission_view::PermissionFocus::Options;
+                                    self.permission_pattern_edit = None;
                                     if is_double_click {
                                         self.last_permission_click = None;
                                         if let Some(opt) = perm.options.get(idx) {
@@ -953,13 +953,20 @@ impl AgentView {
                     }
                 }
                 Event::Paste(text) => {
-                    let in_followup = self.permission_queue.front().is_some_and(|p| {
-                        p.focus == crate::views::permission_view::PermissionFocus::FollowupInput
-                    });
-                    if in_followup {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Changed
+                    let front_focus = self.permission_queue.front().map(|p| p.focus);
+                    match front_focus {
+                        Some(crate::views::permission_view::PermissionFocus::FollowupInput) => {
+                            self.route_popup_paste(text)
+                        }
+                        Some(crate::views::permission_view::PermissionFocus::PatternEdit) => {
+                            if let Some(edit) = self.permission_pattern_edit.as_mut() {
+                                for ch in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                                    edit.insert_char(ch);
+                                }
+                            }
+                            InputOutcome::Changed
+                        }
+                        _ => InputOutcome::Changed,
                     }
                 }
                 _ => InputOutcome::Changed,
@@ -1071,6 +1078,7 @@ impl AgentView {
                     }
                     if registry.matches_id(ActionId::CancelTurn, key)
                         && (self.session.state.is_turn_running()
+                            || self.session.state.is_compact_running()
                             || self.session.state.is_cancelling())
                     {
                         self.dismiss_jump_picker();
@@ -1095,7 +1103,7 @@ impl AgentView {
                 _ => InputOutcome::Unchanged,
             };
         }
-        if self.question_view.is_some() && self.active_pane != AgentPane::Scrollback {
+        if self.is_question_focused() {
             return match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key!('q', CONTROL).matches(key) {
@@ -1355,7 +1363,7 @@ impl AgentView {
     ) -> InputOutcome {
         match action_id {
             ActionId::CancelTurn => {
-                if self.session.state.is_turn_running() {
+                if self.session.state.is_turn_running() || self.session.state.is_compact_running() {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
                     return InputOutcome::Action(Action::CancelTurn);
                 }
@@ -1465,6 +1473,10 @@ impl AgentView {
             }
             other => resolve_action(Some(other)).unwrap_or(InputOutcome::Unchanged),
         }
+    }
+    /// Whether an open `ask_user_question` card owns the keyboard.
+    pub(crate) fn is_question_focused(&self) -> bool {
+        self.question_view.is_some() && self.active_pane != AgentPane::Scrollback
     }
     /// Returns `true` if the switch happened immediately, `false` if blocked.
     pub(crate) fn set_active_pane(&mut self, target: AgentPane, force: bool) -> bool {
@@ -1620,6 +1632,40 @@ mod background_and_tasks_shortcut_tests {
             assert_eq!(agent.prompt.history_search.selected, selected);
             assert_eq!(agent.prompt.text(), text);
             assert_eq!(agent.prompt.cursor(), cursor);
+        }
+    }
+    #[test]
+    fn shortcuts_key_tears_down_history_and_opens_cheatsheet() {
+        use crate::views::modal::ActiveModal;
+        let registry = ActionRegistry::defaults();
+        let history = [HistoryEntry {
+            text: "earlier prompt".into(),
+        }];
+        for key in [
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        ] {
+            for browse in [true, false] {
+                let mut agent = make_agent();
+                agent.set_active_pane(AgentPane::Prompt, true);
+                if browse {
+                    agent.prompt.history_search.activate_browse(&history, "");
+                    agent.prompt.set_text("earlier prompt");
+                } else {
+                    agent.prompt.history_search.activate(&history, "query");
+                    agent.prompt.set_text("query");
+                }
+                let out = agent.handle_prompt_key_with_registry_for_test(&key, &registry);
+                assert!(matches!(out, InputOutcome::Changed));
+                assert!(
+                    matches!(agent.active_modal, Some(ActiveModal::ShortcutsHelp { .. })),
+                    "shortcuts key must open the cheatsheet"
+                );
+                assert!(
+                    !agent.prompt.history_search.is_active(),
+                    "history overlay must be torn down first"
+                );
+            }
         }
     }
     #[test]
@@ -2360,7 +2406,12 @@ mod esc_would_cancel_turn_tests {
 mod jump_backout_key_tests {
     use super::test_fixtures::make_agent;
     use super::{AgentPane, AgentView};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent::{AgentCommand, AgentState};
+    use crate::app::app_view::InputOutcome;
     use crate::views::jump::{JumpRestore, JumpState};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     fn open_jump(agent: &mut AgentView) {
         agent.jump_state = Some(JumpState {
             entries: Vec::new(),
@@ -2371,6 +2422,9 @@ mod jump_backout_key_tests {
                 follow_mode: false,
             },
         });
+    }
+    fn ctrl_c() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
     }
     /// In the dashboard overlay, a bare Esc backs out via
     /// `no_esc_consumer_pending`; the open `/jump` picker must count as a
@@ -2403,6 +2457,26 @@ mod jump_backout_key_tests {
         assert!(
             !agent.is_empty_focused_prompt(),
             "an open /jump picker owns Esc/Left in the overlay back-out"
+        );
+    }
+    /// `/jump` must not swallow Ctrl+C while `/compact` is running — same
+    /// hatch as a running turn.
+    #[test]
+    fn jump_picker_ctrl_c_cancels_compact() {
+        let mut agent = make_agent();
+        agent.session.state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        open_jump(&mut agent);
+        let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+        assert!(
+            agent.jump_state.is_none(),
+            "Ctrl+C during /compact must dismiss the jump picker"
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "Ctrl+C during /compact with /jump open must cancel, got {outcome:?}"
         );
     }
 }

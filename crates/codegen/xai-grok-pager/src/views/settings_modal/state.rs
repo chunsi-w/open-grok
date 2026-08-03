@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SecretInput,
-    SettingCategory, SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry,
-    StringValidator, current_value_for, dynamic_enum_choices, dynamic_multi_select_choices,
+    current_value_for, dynamic_enum_choices, dynamic_multi_select_choices, CodingDataSharingLock,
+    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SecretInput, SettingCategory, SettingKey,
+    SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -1083,6 +1083,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
+        "enter_steers" => Some(Action::SetEnterSteers(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),

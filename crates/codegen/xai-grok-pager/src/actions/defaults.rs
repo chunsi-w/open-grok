@@ -3,7 +3,7 @@
 //! All key bindings are defined here — not scattered across event handlers.
 
 use crate::key;
-use crate::terminal::{TerminalName, terminal_context};
+use crate::terminal::{terminal_context, TerminalName};
 
 use super::{ActionDef, ActionId, Category, When};
 
@@ -655,7 +655,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Sends a message to the agent mid-turn without cancelling it (interject), so you can steer or add context while it keeps working.\nPlain Enter while a turn is running queues a follow-up for later; this chord merges composer text into the current turn instead.\nWith an empty composer, bare Enter (or this chord) force-sends the top queued follow-up from the prompt — no need to focus the queue pane. On the queue pane, this chord force-sends the selected row.\nReach for it to correct course without losing the turn's progress.",
+                "Sends a message mid-turn by cancelling the current turn and running the new prompt next (\"send now\").\nPlain Enter while a turn is running queues a follow-up for later; this chord does the opposite.\nWith Settings → Enter steers mid-turn enabled, those roles swap: Enter sends now and this chord queues.\nWith an empty composer, bare Enter (or this chord) force-sends the top queued follow-up from the prompt — no need to focus the queue pane. On the queue pane, this chord force-sends the selected row.",
             ),
         },
         ActionDef {
@@ -963,8 +963,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::DashboardStop,
-            label: "stop",
-            description: "Stop / Close agent",
+            label: "delete",
+            description: "Stop / Delete agent",
             default_key: key!('x', CONTROL),
             alt_keys: vec![],
             category: Category::Dashboard,
@@ -973,7 +973,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Stops the selected agent and removes its row from the dashboard; a running turn is interrupted first.\nUse it to clear finished or unwanted agents without attaching to them.\nThe in-overlay equivalent (Ctrl+X) confirms before stopping.",
+                "On a busy top-level row, Ctrl+X cancels the running turn. Once the row is idle, press Ctrl+X again within 2s to permanently delete the session.\nOn a subagent row, Ctrl+X kills the subagent.",
             ),
         },
         ActionDef {

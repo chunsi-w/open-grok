@@ -58,9 +58,13 @@ impl LogEntry {
     }
 }
 
+/// An entry holds a whole conversation, so the log evicts oldest first.
+const MAX_LOGGED_REQUESTS: usize = 1024;
+
 pub struct RequestLog {
     count: AtomicU32,
     entries: std::sync::Mutex<Vec<LogEntry>>,
+    keep_entries: AtomicBool,
 }
 
 impl RequestLog {
@@ -68,6 +72,7 @@ impl RequestLog {
         Self {
             count: AtomicU32::new(0),
             entries: std::sync::Mutex::new(Vec::new()),
+            keep_entries: AtomicBool::new(true),
         }
     }
 
@@ -80,7 +85,14 @@ impl RequestLog {
         headers: Vec<(String, String)>,
     ) {
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.entries.lock().unwrap().push(LogEntry {
+        if !self.keep_entries.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut entries = self.entries.lock().unwrap();
+        if entries.len() >= MAX_LOGGED_REQUESTS {
+            entries.remove(0);
+        }
+        entries.push(LogEntry {
             method: method.to_string(),
             path: path.to_string(),
             body: body.cloned(),
@@ -514,6 +526,11 @@ impl MockInferenceServer {
 
     pub fn request_count(&self) -> u32 {
         self.log.count.load(Ordering::SeqCst)
+    }
+
+    /// Stop retaining entries. [`Self::request_count`] stays exact.
+    pub fn set_keep_requests(&self, enabled: bool) {
+        self.log.keep_entries.store(enabled, Ordering::SeqCst);
     }
 
     pub fn requests(&self) -> Vec<LogEntry> {

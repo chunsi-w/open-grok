@@ -142,10 +142,37 @@ impl ClusterClient {
                 matches!(self.app.current_ui.permission_mode.as_deref(), Some("auto")),
             ),
             swarm_mode: self.app.current_ui.swarm_mode.unwrap_or(false),
-            chat_mode: self.app.chat_mode,
+            chat_mode: {
+                #[cfg(feature = "local-workspace")]
+                {
+                    if crate::app::event_loop::welcome_history_build_bypass_applies(
+                        &effs,
+                        self.app.welcome_history_load_as_build,
+                    ) {
+                        if crate::app::event_loop::welcome_history_build_bypass_consume(
+                            &effs,
+                            self.app.welcome_history_load_as_build,
+                        ) {
+                            self.app.welcome_history_load_as_build = false;
+                        }
+                        false
+                    } else {
+                        self.app.chat_mode
+                    }
+                }
+                #[cfg(not(feature = "local-workspace"))]
+                {
+                    self.app.chat_mode
+                }
+            },
             screen_mode_label: Some(self.app.screen_mode.meta_label()),
             is_api_key_auth: self.app.is_api_key_auth,
             resume_local_miss: self.app.resume_local_miss.clone(),
+            #[cfg(feature = "local-workspace")]
+            local_workspace: match self.app.welcome_session_local_workspace.take() {
+                Some(one_shot) => one_shot,
+                None => crate::app::session_startup::active_local_workspace().unwrap_or(None),
+            },
         };
         for eff in effs {
             let (_quit, _meta) = effects::execute(
@@ -534,7 +561,6 @@ impl PagerLeaderCluster {
         app.leader_mode = true;
         app.auth_state = AuthState::Done;
         app.trust_state = TrustState::Done;
-        app.project_picker_shown = true;
         app.cwd = self.workdir.path().to_path_buf();
 
         let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();

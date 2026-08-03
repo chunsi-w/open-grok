@@ -595,7 +595,7 @@ impl PendingAction {
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
     /// the dashboard-overlay stop (Ctrl+X), which mirrors the
-    /// dashboard's [`crate::views::dashboard::state::STOP_CONFIRM_WINDOW`]
+    /// dashboard's [`crate::views::dashboard::state::CONFIRM_WINDOW`]
     /// rather than the default double-press TTL.
     pub fn with_ttl(
         action: Action,
@@ -761,11 +761,6 @@ pub struct AppView {
     pub(crate) pending_perplexity_rebuild_agents: std::collections::HashSet<AgentId>,
     /// Working directory.
     pub cwd: PathBuf,
-    /// Whether the project picker question has already been shown this session.
-    pub project_picker_shown: bool,
-    /// "Don't ask me again" opt-out from [`xai_grok_shell::util::config::resolve_hints`];
-    /// TUI writes to user `config.toml` only.
-    pub project_picker_disabled: bool,
     /// Whether the cwd is inside a git repository (any ancestor has `.git`).
     /// Pre-computed at startup so dispatch stays free of filesystem I/O.
     pub cwd_has_git_ancestor: bool,
@@ -849,6 +844,9 @@ pub struct AppView {
     /// Consumer billing surface (credit fetches / warnings). False for team
     /// and API-key auth. `/usage` itself stays available for session token/cost.
     pub usage_visible: bool,
+    /// External `auth_provider_command` deployment.
+    /// No grok.com billing session exists; `/usage` and credit UI stay off.
+    pub has_external_auth_provider: bool,
     /// Slash commands denied for the current subscription tier
     /// ([`TIER_RESTRICTED_COMMANDS`] when the user is on the free / X Basic
     /// tier, empty otherwise). Recomputed by [`Self::apply_tier_restrictions`]
@@ -1014,6 +1012,12 @@ pub struct AppView {
     pub welcome_privacy_banner_opt_out_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_terms_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_policy_rect: Option<ratatui::layout::Rect>,
+    /// Hit-test rects for the welcome workspace-mode picker.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_workspace_mode_rects: crate::views::welcome::WorkspaceModeHitRects,
+    /// Sticky hover flag for the workspace-mode picker (redraw on enter/leave).
+    #[cfg(feature = "local-workspace")]
+    pub welcome_on_workspace_mode: bool,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
     /// Sticky hover flag for the privacy banner buttons (redraw on enter/leave).
@@ -1067,6 +1071,9 @@ pub struct AppView {
     /// [`crate::views::session_picker::effective_filter_query`], skips the
     /// local fuzzy re-filter for server search results.
     pub session_picker_entries_query: Option<String>,
+    /// Armed welcome-screen session delete (`d` then `y`), shared shape with
+    /// the modal `/resume` picker.
+    pub session_picker_pending_delete: Option<crate::views::session_picker::PendingDelete>,
     /// Tick counter for welcome screen spinner animation.
     pub welcome_tick: u64,
     /// Last shimmer frame drawn on the welcome screen. Lets `tick` throttle the
@@ -1113,6 +1120,22 @@ pub struct AppView {
     /// profiles on create/load while set. `/chat` does **not** set this
     /// (uses [`Self::deferred_startup`] one-shot state instead).
     pub chat_mode: bool,
+    /// Welcome picker mode; ignored when `local_workspace_startup_locked`.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
+    /// CLI/env already stamped local workspace; welcome must not override.
+    #[cfg(feature = "local-workspace")]
+    pub local_workspace_startup_locked: bool,
+    /// One-shot next-session stamp: `Some(None)` sandbox, `Some(cfg)` local.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_session_local_workspace:
+        Option<Option<crate::app::session_startup::LocalWorkspaceConfig>>,
+    /// First-run Local ACK still pending in the TUI.
+    #[cfg(feature = "local-workspace")]
+    pub welcome_local_workspace_ack_pending: bool,
+    /// Next welcome history load is local-disk/build (does not set `chat_mode`).
+    #[cfg(feature = "local-workspace")]
+    pub welcome_history_load_as_build: bool,
     /// Whether mouse capture is currently enabled. Disabled during the
     /// Authenticating state so the terminal handles native text selection.
     pub mouse_captured: bool,
@@ -1372,6 +1395,52 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     };
     chrono::Utc::now() >= next
 }
+
+/// Detect external-auth installs once at pager startup.
+///
+/// Checks ACP auth-method meta, `OPENGROK_AUTH_PROVIDER_COMMAND` (and the
+/// legacy `GROK_AUTH_PROVIDER_COMMAND` name shell still reads), and effective
+/// config `auth_provider_command`.
+pub(crate) fn detect_external_auth_provider(
+    auth_methods: &[agent_client_protocol::AuthMethod],
+) -> bool {
+    fn auth_method_is_external(method: &agent_client_protocol::AuthMethod) -> bool {
+        method
+            .meta()
+            .as_ref()
+            .and_then(|v| v.get("external_provider"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+    fn env_set() -> bool {
+        for key in [
+            "OPENGROK_AUTH_PROVIDER_COMMAND",
+            "GROK_AUTH_PROVIDER_COMMAND",
+        ] {
+            if std::env::var(key)
+                .ok()
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                return true;
+            }
+        }
+        false
+    }
+    fn config_set() -> bool {
+        let Ok(raw) = xai_grok_shell::config::load_effective_config() else {
+            return false;
+        };
+        let Ok(cfg) = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw) else {
+            return false;
+        };
+        cfg.grok_com_config
+            .auth_provider_command
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+    auth_methods.iter().any(auth_method_is_external) || env_set() || config_set()
+}
+
 impl AppView {
     /// Cancel an automatic Kimi sampler refresh after an authoritative user or
     /// remote switch moved the tab to a different provider.
@@ -1685,7 +1754,9 @@ impl AppView {
                 .subscription_tier
                 .as_deref()
                 .is_some_and(is_api_key_label);
-        self.apply_usage_visibility(meta.team_name.is_none() && !self.is_api_key_auth);
+        self.apply_usage_visibility(
+            meta.team_name.is_none() && !self.is_api_key_auth && !self.has_external_auth_provider,
+        );
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
@@ -1777,8 +1848,6 @@ impl AppView {
             perplexity_web_search_update_pending: false,
             pending_perplexity_rebuild_agents: Default::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            project_picker_shown: false,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: std::env::current_dir()
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
@@ -1835,6 +1904,10 @@ impl AppView {
             welcome_privacy_banner_opt_out_rect: None,
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode_rects: Default::default(),
+            #[cfg(feature = "local-workspace")]
+            welcome_on_workspace_mode: false,
             welcome_toast: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -1858,6 +1931,7 @@ impl AppView {
             session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
+            session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             cli_model_override: None,
@@ -1873,6 +1947,16 @@ impl AppView {
             subagents: false,
             ask_user: false,
             chat_mode: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+            #[cfg(feature = "local-workspace")]
+            local_workspace_startup_locked: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_session_local_workspace: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_local_workspace_ack_pending: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -1948,6 +2032,7 @@ impl AppView {
             sharing_enabled: false,
             plugin_cta_enabled: false,
             usage_visible: true,
+            has_external_auth_provider: false,
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
             credit_balance: None,
@@ -1981,13 +2066,12 @@ impl AppView {
     /// [`take_deferred_model_switch`](crate::app::dispatch::session::lifecycle::take_deferred_model_switch);
     /// resolving it here would use the pre-session dashboard catalog and a
     /// remapped menu id could resolve differently.
-    pub fn deferred_model_switch_from_cli(
-        &self,
-    ) -> Option<(
-        acp::ModelId,
-        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
-    )> {
-        Some((self.cli_model_override.clone()?, None))
+    pub fn deferred_model_switch_from_cli(&self) -> Option<crate::app::agent::DeferredModelSwitch> {
+        Some(crate::app::agent::DeferredModelSwitch {
+            model_id: self.cli_model_override.clone()?,
+            effort: None,
+            prev_model_id: None,
+        })
     }
     /// Voice capture is armed: the in-prompt dictation overlay can show and
     /// Ctrl+Space can start capture.
@@ -2024,6 +2108,11 @@ impl AppView {
     /// query. `usage_visible` remains the xAI billing/UI gate; Codex quota is
     /// independently available whenever its account is connected.
     pub(crate) fn usage_command_visible(&self) -> bool {
+        // External/enterprise auth has no consumer billing surface and must
+        // hide `/usage` even when a Codex account is also connected.
+        if self.has_external_auth_provider {
+            return false;
+        }
         self.usage_visible || self.startup_codex_account.is_some()
     }
 
@@ -2352,16 +2441,6 @@ impl AppView {
                 .map(|sid| sid.0.as_ref()),
             _ => None,
         }
-    }
-    /// Whether the project picker should intercept the next prompt.
-    pub fn needs_project_picker(&self) -> bool {
-        !self.project_picker_shown
-            && !self.project_picker_disabled
-            && !crate::project_picker::detection::is_project_dir(&self.cwd)
-    }
-    /// Mark the project picker as resolved so it won't fire again.
-    pub fn mark_project_picker_done(&mut self) {
-        self.project_picker_shown = true;
     }
     /// Show a toast on the currently active view.
     ///
@@ -3026,7 +3105,7 @@ impl AppView {
                                     Action::DashboardOverlayStop,
                                     KeyShortcut::from(*key),
                                     Some("close this session"),
-                                    crate::views::dashboard::state::STOP_CONFIRM_WINDOW,
+                                    crate::views::dashboard::state::CONFIRM_WINDOW,
                                 ));
                                 return InputOutcome::Changed;
                             }
@@ -3861,9 +3940,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 None => return InputOutcome::Changed,
             },
             PickerOutcome::SubmitQuery => {
-                let query = ctx.sp_state.query().trim().to_string();
-                if !query.is_empty() {
-                    return InputOutcome::Action(Action::LoadSession(query, None, false));
+                if let Some(sid) =
+                    crate::views::session_picker::session_id_for_direct_load(ctx.sp_state.query())
+                {
+                    return InputOutcome::Action(Action::LoadSession(sid.to_string(), None, false));
                 }
                 return InputOutcome::Unchanged;
             }
@@ -4896,6 +4976,12 @@ impl AppView {
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
                             privacy_banner,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode: self.welcome_workspace_mode,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode_startup_locked: self.local_workspace_startup_locked,
+                            #[cfg(feature = "local-workspace")]
+                            workspace_mode_ack_pending: self.welcome_local_workspace_ack_pending,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -4918,6 +5004,10 @@ impl AppView {
                             result.privacy_banner_opt_out_rect;
                         self.welcome_privacy_banner_terms_rect = result.privacy_banner_terms_rect;
                         self.welcome_privacy_banner_policy_rect = result.privacy_banner_policy_rect;
+                        #[cfg(feature = "local-workspace")]
+                        {
+                            self.welcome_workspace_mode_rects = result.workspace_mode_rects;
+                        }
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             crate::views::welcome::paint_welcome_toast(
@@ -6348,8 +6438,6 @@ pub(crate) mod tests {
             perplexity_web_search_update_pending: false,
             pending_perplexity_rebuild_agents: Default::default(),
             cwd: std::path::PathBuf::from("/tmp"),
-            project_picker_shown: true,
-            project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
             scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -6384,6 +6472,16 @@ pub(crate) mod tests {
             subagents: false,
             ask_user: false,
             chat_mode: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+            #[cfg(feature = "local-workspace")]
+            local_workspace_startup_locked: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_session_local_workspace: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_local_workspace_ack_pending: false,
+            #[cfg(feature = "local-workspace")]
+            welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -6475,6 +6573,10 @@ pub(crate) mod tests {
             welcome_privacy_banner_opt_out_rect: None,
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
+            #[cfg(feature = "local-workspace")]
+            welcome_workspace_mode_rects: Default::default(),
+            #[cfg(feature = "local-workspace")]
+            welcome_on_workspace_mode: false,
             welcome_toast: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -6498,6 +6600,7 @@ pub(crate) mod tests {
             session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
+            session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
@@ -6521,6 +6624,7 @@ pub(crate) mod tests {
             sharing_enabled: false,
             plugin_cta_enabled: false,
             usage_visible: true,
+            has_external_auth_provider: false,
             tier_restricted_commands: Vec::new(),
             leader_mode: true,
             credit_balance: None,
@@ -7784,6 +7888,24 @@ pub(crate) mod tests {
         assert!(agent.show_ephemeral_tip(tip(), &mut counts));
         assert_eq!(counts.get("t_seen"), Some(&2));
     }
+
+    #[test]
+    fn external_auth_provider_keeps_billing_off_after_auth_meta() {
+        let mut app = test_app();
+        app.has_external_auth_provider = true;
+        app.usage_visible = false;
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        // External/enterprise auth must keep the consumer billing surface and
+        // combined `/usage` command hidden even after a personal AuthMeta.
+        assert!(!app.usage_visible);
+        assert!(
+            !app.welcome_prompt
+                .slash_controller
+                .billing_surface_visible()
+        );
+        assert!(!app.usage_command_visible());
+    }
+
     #[test]
     fn apply_auth_meta_disables_billing_surface_for_team_users() {
         let mut app = test_app();
@@ -12532,30 +12654,6 @@ pub(crate) mod tests {
             app.agents.contains_key(&id),
             "ExitSession intercept must NOT remove the agent (it only closes the popup)",
         );
-    }
-    #[test]
-    fn needs_project_picker_false_when_disabled() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = true;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_false_when_already_shown() {
-        let mut app = test_app();
-        app.project_picker_shown = true;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        app.project_picker_disabled = false;
-        assert!(!app.needs_project_picker());
-    }
-    #[test]
-    fn needs_project_picker_true_for_non_project_dir() {
-        let mut app = test_app();
-        app.project_picker_shown = false;
-        app.project_picker_disabled = false;
-        app.cwd = std::path::PathBuf::from("/tmp");
-        assert!(app.needs_project_picker());
     }
     /// Chat mode hides the welcome picker's source filter, so `f` must not
     /// cycle it; Build mode keeps the cycle.

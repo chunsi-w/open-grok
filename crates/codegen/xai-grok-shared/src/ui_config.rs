@@ -241,6 +241,13 @@ pub struct UiConfig {
     /// Combine consecutive queued follow-ups into one turn. `None` = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_queued_prompts: Option<bool>,
+    /// Mid-turn Enter / Ctrl+Enter roles. `None`/`false` (default): Enter queues
+    /// a follow-up and Ctrl+Enter (or the host send-now chord) sends now.
+    /// `true`: Enter sends now and Ctrl+Enter queues — Open Grok's adaptation of
+    /// Codex's historical `steer_enabled` toggle onto the Enter ↔ Ctrl+Enter
+    /// pair (Codex used Enter ↔ Tab).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_steers: Option<bool>,
     /// Display-refresh probe + auto-cadence (`[ui.display_refresh]`). Per-field
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
@@ -359,6 +366,7 @@ impl Default for UiConfig {
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
+            enter_steers: None,
             display_refresh: DisplayRefreshSettings::default(),
         }
     }
@@ -391,6 +399,15 @@ impl UiConfig {
             .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
     }
 
+    /// Default for [`Self::enter_steers`] when unset (Enter queues; Ctrl+Enter
+    /// sends now).
+    pub const ENTER_STEERS_DEFAULT: bool = false;
+
+    /// Resolved mid-turn Enter-steers setting.
+    pub fn enter_steers_enabled(&self) -> bool {
+        self.enter_steers.unwrap_or(Self::ENTER_STEERS_DEFAULT)
+    }
+
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
     /// or legacy duration 0).
     pub fn keep_text_selection_enabled(&self) -> bool {
@@ -412,6 +429,15 @@ mod tests {
         assert_eq!(enabled.swarm_mode, Some(true));
         let disabled: UiConfig = serde_json::from_str(r#"{"swarm_mode":false}"#).unwrap();
         assert_eq!(disabled.swarm_mode, Some(false));
+    }
+
+    #[test]
+    fn enter_steers_defaults_off_and_resolves() {
+        assert!(!UiConfig::default().enter_steers_enabled());
+        let on: UiConfig = serde_json::from_str(r#"{"enter_steers":true}"#).unwrap();
+        assert!(on.enter_steers_enabled());
+        let off: UiConfig = serde_json::from_str(r#"{"enter_steers":false}"#).unwrap();
+        assert!(!off.enter_steers_enabled());
     }
 
     #[test]

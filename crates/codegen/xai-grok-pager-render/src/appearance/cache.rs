@@ -33,6 +33,7 @@ const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
 /// Combine-queued-prompts rollout flag defaults OFF (opt-in).
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
+const ENTER_STEERS_DEFAULT: bool = UiConfig::ENTER_STEERS_DEFAULT;
 const SIMPLE_MODE_DEFAULT: bool = true;
 /// Vim-mode scrollback default — matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
@@ -211,6 +212,40 @@ pub fn set_combine_queued_prompts(enabled: bool) {
 /// `load_*`. Plain getter — inert for the shared-rlib CI lanes.
 pub fn peek_combine_queued_prompts() -> bool {
     COMBINE_QUEUED_PROMPTS_CURRENT.with(|c| c.get())
+}
+
+// -- Enter steers (mid-turn Enter ↔ Ctrl+Enter swap) --------------------------
+
+thread_local! {
+    static ENTER_STEERS_CURRENT: Cell<bool> = const { Cell::new(ENTER_STEERS_DEFAULT) };
+    static ENTER_STEERS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `enter_steers`, seeding from `[ui]` on first call.
+pub fn load_enter_steers() -> bool {
+    ENTER_STEERS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ENTER_STEERS_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "enter_steers",
+                    ENTER_STEERS_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ENTER_STEERS_CURRENT.with(|c| c.get())
+}
+
+pub fn set_enter_steers(enabled: bool) {
+    ENTER_STEERS_CURRENT.with(|c| c.set(enabled));
+    ENTER_STEERS_LOADED.with(|l| l.set(true));
+}
+
+/// Current cached `enter_steers` WITHOUT the lazy disk seed (compiled default
+/// OFF). Prefer in `cfg(test)` so unit tests never observe on-disk `[ui]`.
+pub fn peek_enter_steers() -> bool {
+    ENTER_STEERS_CURRENT.with(|c| c.get())
 }
 
 // -- Simple mode --------------------------------------------------------------
@@ -628,6 +663,7 @@ pub fn prime(ui: &UiConfig) {
         ui.combine_queued_prompts
             .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT),
     );
+    set_enter_steers(ui.enter_steers_enabled());
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
     // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
@@ -745,6 +781,7 @@ mod tests {
             ui.combine_queued_prompts
                 .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT)
         );
+        assert_eq!(ENTER_STEERS_DEFAULT, ui.enter_steers_enabled());
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
         assert_eq!(
@@ -834,6 +871,18 @@ mod tests {
             assert!(load_combine_queued_prompts());
             set_combine_queued_prompts(false);
             assert!(!load_combine_queued_prompts());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_then_load_round_trips_enter_steers() {
+        std::thread::spawn(|| {
+            set_enter_steers(true);
+            assert!(load_enter_steers());
+            set_enter_steers(false);
+            assert!(!load_enter_steers());
         })
         .join()
         .unwrap();

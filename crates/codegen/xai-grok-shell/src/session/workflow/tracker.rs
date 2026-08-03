@@ -47,7 +47,7 @@ impl WorkflowRunStatus {
     /// Script-initiated pauses count: a workflow that pauses itself is asking
     /// for outside help (a blocker to fix, then resume), and silence would
     /// strand it. Only a deliberate user pause stays quiet.
-    pub fn is_completion_reportable(self) -> bool {
+    pub(crate) fn is_completion_reportable(self) -> bool {
         self.is_terminal() || (self.is_paused() && self != Self::UserPaused)
     }
 
@@ -63,7 +63,7 @@ impl WorkflowRunStatus {
         )
     }
 
-    pub fn is_resumable(self) -> bool {
+    pub(crate) fn is_resumable(self) -> bool {
         self.is_paused() || self == Self::Failed
     }
 
@@ -198,7 +198,7 @@ fn now_rfc3339() -> String {
 }
 
 #[derive(Debug, Default)]
-pub struct WorkflowTracker {
+pub(crate) struct WorkflowTracker {
     runs: Vec<TrackedRun>,
     reported_terminal_run_ids: std::collections::HashSet<String>,
     terminal_at_restore_run_ids: std::collections::HashSet<String>,
@@ -265,7 +265,7 @@ impl WorkflowTracker {
         state
     }
 
-    pub fn resume_run(
+    pub(crate) fn resume_run(
         &mut self,
         run_id: &str,
         new_agent_budget: Option<u64>,
@@ -399,7 +399,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn agent_started(&mut self, run_id: &str, mut row: WorkflowAgentRow) -> String {
+    pub(crate) fn agent_started(&mut self, run_id: &str, mut row: WorkflowAgentRow) -> String {
         let Some(run) = self.run_mut(run_id) else {
             return if row.label.is_empty() {
                 "agent".to_string()
@@ -427,7 +427,7 @@ impl WorkflowTracker {
     /// Point a roster row at a fresh child session id. Contract retries
     /// spawn a new child session per attempt; the row must follow so live
     /// progress lookups and transcript clicks resolve to the current child.
-    pub fn rebind_agent_id(&mut self, run_id: &str, agent_id: &str, new_agent_id: &str) {
+    pub(crate) fn rebind_agent_id(&mut self, run_id: &str, agent_id: &str, new_agent_id: &str) {
         let Some(run) = self.run_mut(run_id) else {
             return;
         };
@@ -437,7 +437,7 @@ impl WorkflowTracker {
         }
     }
 
-    pub fn agent_finished(
+    pub(crate) fn agent_finished(
         &mut self,
         run_id: &str,
         agent_id: &str,
@@ -462,7 +462,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn pause_user(
+    pub(crate) fn pause_user(
         &mut self,
         run_id: &str,
         message: Option<String>,
@@ -495,7 +495,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn apply_outcome(
+    pub(crate) fn apply_outcome(
         &mut self,
         run_id: &str,
         outcome: &WorkflowOutcome,
@@ -556,7 +556,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn clear_run(&mut self, run_id: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn clear_run(&mut self, run_id: &str) -> Option<WorkflowRunState> {
         let idx = self.runs.iter().position(|r| r.state.run_id == run_id)?;
         let mut removed = self.runs.remove(idx);
         removed.fold_elapsed();
@@ -583,7 +583,7 @@ impl WorkflowTracker {
             .unwrap_or(0)
     }
 
-    pub fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
+    pub(crate) fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
         let runs = snapshots
             .into_iter()
             .map(|mut state| {
@@ -649,7 +649,7 @@ impl WorkflowTracker {
         })
     }
 
-    pub fn take_unreported_terminal_runs(
+    pub(crate) fn take_unreported_terminal_runs(
         &mut self,
     ) -> (Vec<WorkflowRunState>, Vec<WorkflowRunState>) {
         let mut restored = Vec::new();
@@ -676,7 +676,7 @@ impl WorkflowTracker {
         self.list()
     }
 
-    pub fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
+    pub(crate) fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
         let live: Vec<&TrackedRun> = self
             .runs
             .iter()

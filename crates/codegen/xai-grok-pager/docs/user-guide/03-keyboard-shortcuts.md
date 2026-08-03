@@ -93,9 +93,31 @@ Switch between the prompt input and scrollback pane.
 |-----|---------|---------|--------|
 | `Tab` | `Space` (and `i` in vim mode) | Scrollback focused | Focus the prompt input |
 | `Tab` | | Prompt focused | Focus the scrollback (both simple and vim scrollback modes) |
+| `Tab` | `Shift+Tab` (backwards) | Question card focused | Walk the card's answers, wrapping round at the ends. Focus stays in the card |
 | `Enter` | | Prompt focused | Send the current prompt |
 
 **Esc is not a focus key.** It follows the cancel / clear / rewind semantics below. The mid-turn cancel is the only branch gated on `[ui].vim_mode` (scrollback nav); nothing depends on `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
+
+## Question card (`ask_user_question`)
+
+While the agent is waiting on an answer, the card owns the keyboard.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between answers (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk the answers in a loop: every answer of this question, then the next question's, and off the last answer back to the first |
+| `←` / `→`, `h` / `l`, `[` / `]` | Previous / next question |
+| `1`–`9`, `a`–`f` | Pick that answer directly |
+| `z` | Jump to the free-text row and start typing |
+| `Space` | Toggle the focused answer (multi-select), or start typing on the free-text row |
+| `Enter` | Select and advance, submit on the last question, or edit the free-text row |
+| `Esc` | Unselect this question's answer. It does not move focus |
+| `y` | Copy the focused answer |
+| `Shift+X` | Dismiss the question (the agent continues without an answer) |
+| `Ctrl+F` | Fullscreen the card |
+
+While typing a free-text answer, `Enter` submits and `Esc` returns to the
+answer rows; every other key goes to the text field.
 
 ## Escape
 
@@ -187,6 +209,8 @@ While the agent is generating:
   - **Idle**, or **empty composer with nothing queued** → no-op for that key.
 - While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately — the shell cancels the blocked turn and runs your message next.
 
+**Settings → Enter steers mid-turn** (`[ui].enter_steers`) swaps the mid-turn roles of plain Enter and the send-now chord: Enter sends now, and the chord queues. Empty-composer Enter (force-send the top queued row) is unchanged. This mirrors Codex's historical steer toggle, adapted to Open Grok's Enter ↔ Ctrl+Enter pair (Codex used Enter ↔ Tab).
+
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
 | Default | `Ctrl+Enter` | `Ctrl+I` | Send now (cancels the current turn, runs your message next) |
@@ -253,7 +277,7 @@ Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/
 | `Ctrl+R` | Rename the selected agent |
 | `Ctrl+T` | Pin / unpin |
 | `Ctrl+G` | Toggle grouping (state ↔ working directory) |
-| `Ctrl+X` | Stop a running turn, or press twice within 2s to close the session |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
 | `Ctrl+O` | Toggle always-approve on the selected agent |
 | `Tab` | Toggle focus between the list and the dispatch / peek input |
 | `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |

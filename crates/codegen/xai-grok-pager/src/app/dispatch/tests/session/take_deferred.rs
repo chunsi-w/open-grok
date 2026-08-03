@@ -1,4 +1,5 @@
 use crate::acp::model_state::{EffortTokenError, ModelState};
+use crate::app::agent::DeferredModelSwitch;
 use crate::app::dispatch::session::lifecycle::{DeferredSwitchOutcome, take_deferred_model_switch};
 use agent_client_protocol as acp;
 use std::sync::Arc;
@@ -41,7 +42,10 @@ fn effort_only_resolves_canonical_token() {
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((models.current.clone().unwrap(), Some(ReasoningEffort::High))),
+            switch: Some(switch(
+                models.current.clone().unwrap(),
+                Some(ReasoningEffort::High)
+            )),
             effort_error: None,
         }
     );
@@ -54,7 +58,7 @@ fn effort_only_resolves_remapped_menu_id() {
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((
+            switch: Some(switch(
                 models.current.clone().unwrap(),
                 Some(ReasoningEffort::Xhigh)
             )),
@@ -123,14 +127,14 @@ fn stashed_model_switch_prefers_explicit_stash() {
     let models = models_with_current(true);
     let other = acp::ModelId::new(Arc::from("other-model"));
     let out = take_deferred_model_switch(
-        Some((other.clone(), Some(ReasoningEffort::Low))),
+        Some(switch(other.clone(), Some(ReasoningEffort::Low))),
         &models,
         Some("high"),
     );
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((other, Some(ReasoningEffort::Low))),
+            switch: Some(switch(other, Some(ReasoningEffort::Low))),
             effort_error: None,
         }
     );
@@ -140,11 +144,12 @@ fn stashed_model_switch_prefers_explicit_stash() {
 fn stashed_model_re_resolves_remap_when_effort_missing() {
     let models = models_with_current(true);
     let current = models.current.clone().unwrap();
-    let out = take_deferred_model_switch(Some((current.clone(), None)), &models, Some("deep"));
+    let out =
+        take_deferred_model_switch(Some(switch(current.clone(), None)), &models, Some("deep"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((current, Some(ReasoningEffort::Xhigh))),
+            switch: Some(switch(current, Some(ReasoningEffort::Xhigh))),
             effort_error: None,
         }
     );
@@ -154,11 +159,12 @@ fn stashed_model_re_resolves_remap_when_effort_missing() {
 fn stashed_model_keeps_model_when_token_unresolvable() {
     let models = models_with_current(true);
     let current = models.current.clone().unwrap();
-    let out = take_deferred_model_switch(Some((current.clone(), None)), &models, Some("bogus"));
+    let out =
+        take_deferred_model_switch(Some(switch(current.clone(), None)), &models, Some("bogus"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((current, None)),
+            switch: Some(switch(current, None)),
             effort_error: Some(EffortTokenError::UnknownToken {
                 token: "bogus".into(),
                 offered: vec!["deep".into(), "high".into(), "max".into(), "ultra".into()],
@@ -174,11 +180,11 @@ fn stashed_model_keeps_model_when_unsupported() {
     let mut models = models_with_current(true);
     let (plain, plain_info) = model_with_support("plain-model", false);
     models.available.insert(plain.clone(), plain_info);
-    let out = take_deferred_model_switch(Some((plain.clone(), None)), &models, Some("high"));
+    let out = take_deferred_model_switch(Some(switch(plain.clone(), None)), &models, Some("high"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((plain, None)),
+            switch: Some(switch(plain, None)),
             effort_error: Some(EffortTokenError::Unsupported),
         }
     );
@@ -195,7 +201,7 @@ fn effort_only_keeps_max_and_ultra_distinct() {
         assert_eq!(
             out,
             DeferredSwitchOutcome {
-                switch: Some((models.current.clone().unwrap(), Some(effort))),
+                switch: Some(switch(models.current.clone().unwrap(), Some(effort))),
                 effort_error: None,
             }
         );
@@ -212,4 +218,14 @@ fn effort_only_errors_without_active_model() {
             effort_error: Some(EffortTokenError::NoActiveModel),
         }
     );
+}
+
+/// Stash/outcome with no rollback target (prev threading is covered by the
+/// router/lifecycle tests).
+fn switch(model_id: acp::ModelId, effort: Option<ReasoningEffort>) -> DeferredModelSwitch {
+    DeferredModelSwitch {
+        model_id,
+        effort,
+        prev_model_id: None,
+    }
 }

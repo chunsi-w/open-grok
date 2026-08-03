@@ -283,6 +283,9 @@ pub(crate) struct SessionFlags {
     /// local id/title resolution. Worktree failure messages append the
     /// no-match hint only when the failing target equals this value.
     pub resume_local_miss: Option<String>,
+    /// Process-wide / welcome one-shot local workspace stamp for chat create/load.
+    #[cfg(feature = "local-workspace")]
+    pub local_workspace: Option<crate::app::session_startup::LocalWorkspaceConfig>,
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.
@@ -327,6 +330,10 @@ impl SessionFlags {
         }
         if self.chat_mode {
             meta.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
+            #[cfg(feature = "local-workspace")]
+            if let Some(ref lw) = self.local_workspace {
+                stamp_local_workspace_meta(&mut meta, lw);
+            }
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
@@ -348,7 +355,17 @@ impl SessionFlags {
 pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
     "envId",
     "x.ai/cloud_server_id",
-    "x.ai/cloud_existing_workspace",
+];
+/// FS-only tool ids for local existing workspace (chat attach/own).
+#[cfg(feature = "local-workspace")]
+pub(super) const LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS: &[&str] = &[
+    "workspace.fs_list",
+    "workspace.fs_exists",
+    "workspace.fs_read_file",
+    "workspace.fs_write_file",
+    "workspace.fs_delete_file",
+    "workspace.put_files",
+    "workspace.get_files",
 ];
 /// Stamp `_meta["x.ai/session"].kind = "chat"` and strip Build `agentProfile` (K12).
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
@@ -356,7 +373,88 @@ pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     obj.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
+/// Stamp chat+local intent. Attach also stamps `x.ai/cloud_existing_workspace`.
+/// Own leaves `server_id` unset — shell supervisor mints before handshake.
+///
+/// Never stamps `envId` or `x.ai/cloud_server_id`.
+#[cfg(feature = "local-workspace")]
+pub(super) fn stamp_local_workspace_meta(
+    meta: &mut serde_json::Map<String, serde_json::Value>,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) {
+    use crate::app::session_startup::LocalWorkspaceMode;
+    let mut local = serde_json::Map::new();
+    let mode = match cfg.mode {
+        LocalWorkspaceMode::Attach => "attach",
+        LocalWorkspaceMode::Own => "own",
+    };
+    local.insert("mode".into(), serde_json::json!(mode));
+    if let Some(ref sid) = cfg.server_id {
+        local.insert("server_id".into(), serde_json::json!(sid));
+    }
+    if let Some(ref cwd) = cfg.cwd {
+        local.insert(
+            "cwd".into(),
+            serde_json::json!(cwd.to_string_lossy().into_owned()),
+        );
+    }
+    meta.insert("x.ai/local_workspace".into(), serde_json::Value::Object(local));
+    tracing::info!(
+        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
+        event = "acp_meta_stamped",
+        mode,
+        server_id = cfg.server_id.as_deref(),
+        cwd = cfg.cwd.as_ref().map(|p| p.display().to_string()),
+        "stamped x.ai/local_workspace onto session meta"
+    );
+    if cfg.mode == LocalWorkspaceMode::Attach
+        && let Some(ref sid) = cfg.server_id
+    {
+        let mut existing = serde_json::Map::new();
+        existing.insert("server_id".into(), serde_json::json!(sid));
+        if let Some(ref cwd) = cfg.cwd {
+            existing.insert(
+                "cwd".into(),
+                serde_json::json!(cwd.to_string_lossy().into_owned()),
+            );
+        }
+        meta.insert(
+            "x.ai/cloud_existing_workspace".into(),
+            serde_json::Value::Object(existing),
+        );
+    }
+}
+/// Apply [`stamp_local_workspace_meta`] onto optional ACP meta.
+#[cfg(feature = "local-workspace")]
+pub(super) fn apply_local_workspace_meta(
+    meta: &mut Option<acp::Meta>,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) {
+    let obj = meta.get_or_insert_with(acp::Meta::new);
+    stamp_local_workspace_meta(obj, cfg);
+}
+/// Shared chat create/load/worktree meta finalize: kind + local stamp + scrub.
+pub(super) fn finalize_chat_session_meta(
+    meta: &mut Option<acp::Meta>,
+    is_chat_path: bool,
+    #[cfg_attr(not(feature = "local-workspace"), allow(unused_variables))]
+    session_flags: &SessionFlags,
+) {
+    if !is_chat_path {
+        return;
+    }
+    apply_chat_kind_meta(meta);
+    #[cfg(feature = "local-workspace")]
+    if let Some(ref lw) = session_flags.local_workspace {
+        apply_local_workspace_meta(meta, lw);
+    }
+    scrub_chat_workspace_bind_meta(meta);
+}
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
+///
+/// Narrow scrub exception: keep `x.ai/cloud_existing_workspace` when local
+/// intent is **attach**. Own stamps intent only (shell mints `server_id`).
+/// Never keep `envId` or Direct hub `x.ai/cloud_server_id`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     let Some(obj) = meta.as_mut() else {
         return;
@@ -364,6 +462,68 @@ pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         obj.remove(*key);
     }
+    #[cfg(feature = "local-workspace")]
+    {
+        let allow_existing_attach = obj
+            .get("x.ai/local_workspace")
+            .and_then(|v| v.get("mode"))
+            .and_then(|m| m.as_str())
+            == Some("attach");
+        if !allow_existing_attach {
+            obj.remove("x.ai/cloud_existing_workspace");
+        }
+    }
+    #[cfg(not(feature = "local-workspace"))]
+    {
+        obj.remove("x.ai/cloud_existing_workspace");
+    }
+}
+/// Params for shell ACP `x.ai/session/add_local_workspace`.
+#[cfg(feature = "local-workspace")]
+#[allow(dead_code)]
+pub(crate) fn mid_session_add_local_workspace_params(
+    session_id: &str,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) -> serde_json::Value {
+    let mut meta = serde_json::Map::new();
+    stamp_local_workspace_meta(&mut meta, cfg);
+    let mut opt = Some(meta);
+    scrub_chat_workspace_bind_meta(&mut opt);
+    serde_json::json!({
+        "sessionId": session_id,
+        "meta": opt.unwrap_or_default(),
+    })
+}
+/// Fail closed on operator attestation outside the FS-only allowlist.
+/// `None` / empty attested set → uncheckable → refuse. Live server is not probed.
+#[cfg(feature = "local-workspace")]
+pub(crate) fn reject_non_fs_only_advertised_tools(
+    advertised_tool_ids: Option<&[&str]>,
+) -> Result<(), String> {
+    let Some(ids) = advertised_tool_ids else {
+        return Err(
+            "operator attestation OPENGROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is unset              (uncheckable); refuse attach. Live workspace_server was not inspected — set              the env to a comma-separated FS-only catalog."
+                .into(),
+        );
+    };
+    if ids.is_empty() {
+        return Err(
+            "operator attestation OPENGROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is empty              (uncheckable); refuse attach. Live workspace_server was not inspected."
+                .into(),
+        );
+    }
+    let forbidden: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| !LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS.contains(id))
+        .collect();
+    if !forbidden.is_empty() {
+        return Err(format!(
+            "local-workspace attach refused: non-FS advertised tools {forbidden:?};              only {:?} allowed",
+            LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS
+        ));
+    }
+    Ok(())
 }
 /// Metadata returned from effect execution so the event loop can patch
 /// state that requires a spawned task handle (e.g., auth AbortHandle).
@@ -895,6 +1055,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("combine_queued_prompts", "Bool", &value));
             };
             xai_grok_shell::util::config::set_combine_queued_prompts(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "enter_steers" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("enter_steers", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_enter_steers(b)
                 .await
                 .map_err(|e| e.to_string())
         }

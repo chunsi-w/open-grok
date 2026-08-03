@@ -370,6 +370,7 @@ impl SessionActor {
                 return None;
             }
         };
+        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         match generate_session_compact(
             history,
             surface.function_tools,
@@ -380,6 +381,7 @@ impl SessionActor {
             self.inference_idle_timeout,
             wall_clock_budget_secs,
             self.compaction.tool_choice,
+            &cancel,
         )
         .await
         {
@@ -1136,6 +1138,7 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
+        let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         // Manual/out-of-turn compaction is its own routing scope. Retain this
         // cell across compact retries, but never reuse the last model turn's
         // token or seed a future turn with the compact response.
@@ -1177,6 +1180,16 @@ impl SessionActor {
         })
         .await;
         Ok(())
+    }
+    async fn emit_compact_cancelled(&self, auto_trigger: bool) -> Result<(), acp::Error> {
+        if auto_trigger {
+            use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+            self.send_xai_notification(XaiSessionUpdate::AutoCompactCancelled {
+                reason: crate::extensions::notification::AutoCompactCancelReason::UserCancelled,
+            })
+            .await;
+        }
+        Err(crate::session::helpers::session_compact::CompactFailure::cancelled_error())
     }
     /// Suppress AUTO compaction after a deterministic failure. Scope depends on
     /// the reason (see [`SuppressReason::suppress_state`]): size/schema sticky,
@@ -1432,6 +1445,7 @@ impl SessionActor {
         trigger: xai_grok_telemetry::events::CompactionTrigger,
         codex_turn_state: Arc<std::sync::OnceLock<String>>,
     ) -> Result<(), acp::Error> {
+        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
@@ -1737,6 +1751,7 @@ impl SessionActor {
             self.inference_idle_timeout,
             wall_clock_budget_secs,
             self.compaction.tool_choice,
+            cancel.clone(),
         );
         let observer =
             crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
@@ -1797,6 +1812,13 @@ impl SessionActor {
                     deterministic,
                     context_overflow,
                 }) => {
+                    if cancel.is_cancelled()
+                        || message.contains(
+                            crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
+                        )
+                    {
+                        return self.emit_compact_cancelled(auto_trigger).await;
+                    }
                     if context_overflow {
                         let next_stage = match input_stage {
                             InputStage::Verbatim => Some(InputStage::VerbatimFitted),
@@ -2242,6 +2264,9 @@ impl SessionActor {
         let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
         let compaction_context = state_context.for_compaction();
         let compaction_state_context: &CompactionStateContext = &compaction_context;
+        if cancel.is_cancelled() {
+            return self.emit_compact_cancelled(auto_trigger).await;
+        }
         self.persist_compaction_segment(&segment_messages, &generate_session_compact);
         let transcript_hint = self.transcript_hint();
         let summary_count = self
@@ -2742,6 +2767,7 @@ impl SessionActor {
         trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
@@ -3067,6 +3093,7 @@ mod inline_auto_compact_flow_tests {
                 tool_choice: crate::util::config::CompactionToolChoice::Auto,
                 prefire: crate::session::compaction_config::PrefireState::default(),
                 prefix_released: std::sync::atomic::AtomicBool::new(false),
+                cancel: Default::default(),
             },
             memory: crate::session::memory_state::SessionMemory {
                 embedding_provider: xai_grok_sampling_types::ModelProvider::Xai,
@@ -4424,6 +4451,7 @@ mod inline_auto_compact_flow_tests {
             message: "prompt is too long".to_string(),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
             model_metadata: Some(crate::sampling::ResponseModelMetadata {
                 context_window: Some(context_window),
                 max_completion_tokens: None,
@@ -4432,6 +4460,7 @@ mod inline_auto_compact_flow_tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         }
     }
     /// Primary scenario: remote settings shrinks the context window mid-session.
@@ -4484,10 +4513,12 @@ mod inline_auto_compact_flow_tests {
                     message: "prompt is too long".to_string(),
                     is_retryable: false,
                     retry_after_secs: None,
+                    should_retry: None,
                     model_metadata: None,
                     empty_response_context: None,
                     doom_loop_triggers: None,
                     doom_loop_aborted_at_chunk: None,
+                    credential: xai_grok_sampling_types::SentCredential::Unknown,
                 };
                 assert!(!actor.should_compact_on_error(&err).await);
             })

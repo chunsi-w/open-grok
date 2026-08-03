@@ -415,6 +415,40 @@ pub fn error_cause_chain(err: &dyn std::error::Error) -> String {
     msg
 }
 
+/// First OS error code in `err`'s `source()` chain (e.g. 104 `ECONNRESET` on
+/// Linux, 10054 on Windows), preferring [`std::io::Error::raw_os_error`] and
+/// falling back to the `(os error N)` suffix `io::Error`'s `Display` appends.
+///
+/// The fallback is load-bearing: a reset during the TLS handshake arrives as a
+/// *custom* `io::Error` (kind `Other`, no raw code) whose only record of the
+/// code is that suffix, and without it a rustls reset is indistinguishable
+/// from an unreachable host.
+///
+/// `+ 'static` because `downcast_ref` resolves the type through
+/// [`std::any::Any`], whose type ids only exist for `'static` types.
+pub fn find_os_error_code(err: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if let Some(code) = e.downcast_ref::<std::io::Error>().and_then(|ioe| {
+            ioe.raw_os_error()
+                .or_else(|| parse_os_error(&ioe.to_string()))
+        }) {
+            return Some(code);
+        }
+        cur = e.source();
+    }
+    None
+}
+
+/// Extract `N` from a message ending in `(os error N)`.
+fn parse_os_error(msg: &str) -> Option<i32> {
+    msg.rsplit_once("(os error ")?
+        .1
+        .trim_end_matches(')')
+        .parse()
+        .ok()
+}
+
 /// How a `reqwest` request/send failure should be treated by a retry loop.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransportFailureKind {
@@ -567,6 +601,52 @@ pub fn shared_startup_blocking_client() -> reqwest::blocking::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_os_error_code_walks_source_chain() {
+        #[derive(Debug)]
+        struct IoLeaf(std::io::Error);
+        impl std::fmt::Display for IoLeaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "io leaf")
+            }
+        }
+        impl std::error::Error for IoLeaf {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        #[derive(Debug)]
+        struct Wrapper(IoLeaf);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wrapper")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = Wrapper(IoLeaf(std::io::Error::from_raw_os_error(104)));
+        assert_eq!(find_os_error_code(&err), Some(104));
+        assert_eq!(find_os_error_code(&std::io::Error::other("no code")), None);
+    }
+
+    #[test]
+    fn parse_os_error_ignores_messages_without_a_code() {
+        assert_eq!(
+            parse_os_error("connection closed before message completed"),
+            None
+        );
+        assert_eq!(
+            parse_os_error("invalid peer certificate (os error oops)"),
+            None
+        );
+        assert_eq!(parse_os_error("broken pipe (os error 32)"), Some(32));
+    }
 
     /// The cause-chain formatter appends each `source()` joined with ": ", so a
     /// reqwest error whose `Display` hides the hyper cause still surfaces it.

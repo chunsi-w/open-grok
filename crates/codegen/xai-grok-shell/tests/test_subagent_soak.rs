@@ -1,5 +1,5 @@
 //! Subagent lifecycle soak: churn spawn/run/completion/eviction and assert
-//! threads, fds, and heap/RSS reach steady state. A stub `ChildRunner` drives
+//! threads, open files, and heap/RSS reach steady state. A stub `ChildRunner` drives
 //! the real coordinator/transport.
 //!
 //!   SUBAGENT_SOAK_CYCLES=20000 cargo test -p xai-grok-shell \
@@ -45,7 +45,7 @@ impl Metric {
         match self {
             Metric::Rss => "rss",
             Metric::Threads => "threads",
-            Metric::Fds => "fds",
+            Metric::Fds => "open_files",
         }
     }
 
@@ -54,7 +54,7 @@ impl Metric {
         match self {
             Metric::Rss => "rss_bytes",
             Metric::Threads => "threads",
-            Metric::Fds => "fds",
+            Metric::Fds => "open_files",
         }
     }
 
@@ -69,7 +69,7 @@ impl Metric {
         match self {
             Metric::Rss => bounds.max_rss_growth_mib as f64,
             Metric::Threads => bounds.max_thread_growth as f64,
-            Metric::Fds => bounds.max_fd_growth as f64,
+            Metric::Fds => bounds.max_open_files_growth as f64,
         }
     }
 
@@ -92,22 +92,30 @@ impl MetricValue for ResourceSnapshot {
     fn value_of(&self, metric: Metric) -> Option<usize> {
         // Destructure so a new resource field is a compile error here, not a
         // silently dropped metric.
-        let ResourceSnapshot { rss, threads, fds } = *self;
+        let ResourceSnapshot {
+            rss,
+            threads,
+            open_files,
+        } = *self;
         match metric {
             Metric::Rss => rss,
             Metric::Threads => threads,
-            Metric::Fds => fds,
+            Metric::Fds => open_files,
         }
     }
 }
 
 impl MetricValue for ResourceGrowth {
     fn value_of(&self, metric: Metric) -> Option<usize> {
-        let ResourceGrowth { rss, threads, fds } = *self;
+        let ResourceGrowth {
+            rss,
+            threads,
+            open_files,
+        } = *self;
         match metric {
             Metric::Rss => rss,
             Metric::Threads => threads,
-            Metric::Fds => fds,
+            Metric::Fds => open_files,
         }
     }
 }
@@ -163,7 +171,7 @@ struct Bounds {
     #[serde(rename = "measured_cycles")]
     measure: u64,
     max_thread_growth: u64,
-    max_fd_growth: u64,
+    max_open_files_growth: u64,
     max_rss_growth_mib: u64,
     max_blocks_per_cycle: f64,
     max_bytes_per_cycle: f64,
@@ -178,7 +186,7 @@ impl Bounds {
             warmup: env_parse("SUBAGENT_SOAK_WARMUP", MAX_COMPLETED_ENTRIES as u64),
             measure: env_parse("SUBAGENT_SOAK_CYCLES", 512u64),
             max_thread_growth: env_parse("SUBAGENT_SOAK_MAX_THREAD_GROWTH", 32u64),
-            max_fd_growth: env_parse("SUBAGENT_SOAK_MAX_FD_GROWTH", 64u64),
+            max_open_files_growth: env_parse("SUBAGENT_SOAK_MAX_OPEN_FILES_GROWTH", 64u64),
             max_rss_growth_mib: env_parse("SUBAGENT_SOAK_MAX_RSS_GROWTH_MIB", 256u64),
             max_blocks_per_cycle: env_parse("SUBAGENT_SOAK_MAX_BLOCKS_PER_CYCLE", 2.0f64),
             max_bytes_per_cycle: env_parse("SUBAGENT_SOAK_MAX_BYTES_PER_CYCLE", 4096.0f64),
@@ -515,7 +523,7 @@ fn assert_bounds(bounds: &Bounds, m: &Measurement) {
 /// Keep this the only test in the binary that creates a `dhat::Profiler`.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "subagent soak; run with --ignored (SUBAGENT_SOAK_CYCLES bounds the measured window)"]
-async fn subagent_lifecycle_soak_bounds_threads_fds_and_heap() {
+async fn subagent_lifecycle_soak_bounds_threads_open_files_and_heap() {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::builder().testing().build();
 
@@ -559,7 +567,7 @@ mod tests {
         let snapshot = ResourceSnapshot {
             rss: Some(11),
             threads: Some(22),
-            fds: Some(33),
+            open_files: Some(33),
         };
         assert_eq!(snapshot.value_of(Metric::Rss), Some(11));
         assert_eq!(snapshot.value_of(Metric::Threads), Some(22));
@@ -568,7 +576,7 @@ mod tests {
         let growth = ResourceGrowth {
             rss: Some(1),
             threads: None,
-            fds: Some(3),
+            open_files: Some(3),
         };
         assert_eq!(growth.value_of(Metric::Rss), Some(1));
         assert_eq!(growth.value_of(Metric::Threads), None);
@@ -582,10 +590,10 @@ mod tests {
         let snapshot = ResourceSnapshot {
             rss: Some(1),
             threads: None,
-            fds: Some(3),
+            open_files: Some(3),
         };
         let json = serde_json::to_string(&Wrap(snapshot)).expect("snapshot serializes");
-        assert_eq!(json, r#"{"rss_bytes":1,"threads":null,"fds":3}"#);
+        assert_eq!(json, r#"{"rss_bytes":1,"threads":null,"open_files":3}"#);
     }
 
     #[test]
@@ -608,7 +616,7 @@ mod tests {
             warmup: 0,
             measure: 0,
             max_thread_growth: 3,
-            max_fd_growth: 5,
+            max_open_files_growth: 5,
             max_rss_growth_mib: 7,
             max_blocks_per_cycle: 1.0,
             max_bytes_per_cycle: 2.0,
@@ -640,7 +648,7 @@ mod tests {
             warmup: 0,
             measure: 4,
             max_thread_growth: 100,
-            max_fd_growth: 100,
+            max_open_files_growth: 100,
             max_rss_growth_mib: 100,
             max_blocks_per_cycle: 10.0,
             max_bytes_per_cycle: 10_000.0,
@@ -683,7 +691,7 @@ mod tests {
         let growth = ResourceGrowth {
             rss: Some(200 * 1024 * 1024),
             threads: Some(0),
-            fds: Some(0),
+            open_files: Some(0),
         };
         let failures = check_bounds(&generous_bounds(), &drained(growth, None));
         assert!(
@@ -697,7 +705,7 @@ mod tests {
         let growth = ResourceGrowth {
             rss: Some(100 * 1024 * 1024),
             threads: Some(100),
-            fds: Some(100),
+            open_files: Some(100),
         };
         assert!(check_bounds(&generous_bounds(), &drained(growth, None)).is_empty());
     }
@@ -754,11 +762,11 @@ mod tests {
     }
 
     #[test]
-    fn check_bounds_flags_thread_and_fd_over_budget() {
+    fn check_bounds_flags_thread_and_open_files_over_budget() {
         let growth = ResourceGrowth {
             rss: Some(0),
             threads: Some(200),
-            fds: Some(200),
+            open_files: Some(200),
         };
         let failures = check_bounds(&generous_bounds(), &drained(growth, None));
         assert!(
@@ -766,7 +774,7 @@ mod tests {
             "{failures:?}"
         );
         assert!(
-            failures.iter().any(|f| f.starts_with("fds:")),
+            failures.iter().any(|f| f.starts_with("open_files:")),
             "{failures:?}"
         );
     }

@@ -21,6 +21,7 @@ use crate::agent::init::{bootstrap, exit_on_config_error};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
 use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig, run_auth_flow};
+use crate::leader::protocol::InternalMethod;
 use crate::util::grok_home;
 use dirs;
 
@@ -219,14 +220,12 @@ fn spawn_agent_local(
 /// watcher-side "change detected" logs fired but the reload handlers never
 /// ran. Keep `method` here as the un-prefixed name; the prefix is a wire
 /// detail added in one place.
-fn internal_reload_request_line(id: &str, method: &str, params: serde_json::Value) -> String {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": format!("_{method}"),
-        "params": params,
-    });
-    format!("{}\n", msg)
+fn internal_reload_request_line(
+    id: &str,
+    method: InternalMethod,
+    params: serde_json::Value,
+) -> String {
+    crate::leader::protocol::internal_request_line(id, method, params)
 }
 
 /// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills`
@@ -254,17 +253,17 @@ where
             let (id, method) = match change {
                 crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
                     info!("Skill directory changed on disk, reloading skills for all sessions");
-                    ("skills-reload", "x.ai/internal/reload_skills")
+                    ("skills-reload", InternalMethod::ReloadSkills)
                 }
                 crate::config::watcher::DiscoveryChange::Skills => {
                     info!("Discovery directory created on disk, reloading skills and workflows");
-                    ("skills-reload", "x.ai/internal/reload_skills")
+                    ("skills-reload", InternalMethod::ReloadSkills)
                 }
                 crate::config::watcher::DiscoveryChange::Workflows => {
                     info!(
                         "Workflow directory changed on disk, re-advertising commands for all sessions"
                     );
-                    ("workflows-reload", "x.ai/internal/reload_workflows")
+                    ("workflows-reload", InternalMethod::ReloadWorkflows)
                 }
             };
             let line = internal_reload_request_line(id, method, serde_json::json!({}));
@@ -397,8 +396,6 @@ pub async fn run_stdio_agent(
 
             // Restore managed policy right before bootstrap reads it (no stale window after prefetch).
             crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-            // Fail-closed external-OTEL gate: suppress until settings resolve,
-            // opening now only for a pure env-API-key user (no remote policy).
             apply_otel_config(&auth_manager, &agent_config.grok_com_config);
             let handle_io = spawn_agent_local(
                 agent_config,
@@ -429,22 +426,12 @@ pub async fn run_headless(
     reauthenticate: bool,
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
-    run_headless_inner(agent_config, reauthenticate, false, memory_config).await
-}
-
-/// Run the headless agent without opening any browser windows.
-/// If no cached credentials exist, returns an error instead of starting OAuth flow.
-pub async fn run_headless_no_browser(
-    agent_config: &AgentConfig,
-    memory_config: Option<crate::config::MemoryConfig>,
-) -> anyhow::Result<()> {
-    run_headless_inner(agent_config, false, true, memory_config).await
+    run_headless_inner(agent_config, reauthenticate, memory_config).await
 }
 
 async fn run_headless_inner(
     agent_config: &AgentConfig,
     reauthenticate: bool,
-    no_browser: bool,
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
@@ -471,17 +458,7 @@ async fn run_headless_inner(
     agent_config.mode = crate::agent::config::AgentMode::Headless;
 
     let ctx = &agent_config.grok_com_config;
-    let (mut auth, did_browser_flow) = if no_browser {
-        // No-browser mode: only use cached credentials, skip OAuth flow
-        let auth_manager = agent_config.create_auth_manager();
-        match auth_manager.current() {
-            Some(auth) => (auth, false),
-            None if auth_manager.is_expired() => {
-                anyhow::bail!("Session expired. Please run 'open-grok login' to re-authenticate.")
-            }
-            None => anyhow::bail!("No cached credentials found. Run `open-grok login`."),
-        }
-    } else if reauthenticate {
+    let (mut auth, did_browser_flow) = if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));
         run_auth_flow(
             &auth_manager,
@@ -567,7 +544,7 @@ async fn run_headless_inner(
 
     // Create first-connection callback for headless-specific behavior
     let on_first_connect: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
-        if !did_browser_flow && !no_browser {
+        if !did_browser_flow {
             // Print to stderr (not logger) so user sees it
             eprintln!();
             eprintln!(
@@ -942,10 +919,8 @@ pub fn suppress_otel() {
 }
 
 /// Startup external-OTEL gate for an in-process (embedded) agent. Mirrors the
-/// leader startup gate so the pager process is fail-closed by construction at the
-/// agent boundary: suppress until the agent's first settings outcome, except a
-/// pure env-API-key user (no session now, none minting) whose stream has no
-/// remote policy and may emit immediately.
+/// leader startup gate so the pager process is fail-closed by construction at
+/// the agent boundary.
 pub fn apply_otel_config(auth_manager: &AuthManager, grok_com_config: &GrokComConfig) {
     suppress_otel();
     // Session presence is disk-based (valid or expired), not refresh success: an
@@ -953,10 +928,9 @@ pub fn apply_otel_config(auth_manager: &AuthManager, grok_com_config: &GrokComCo
     // must keep the gate closed.
     let has_session = auth_manager.current().is_some() || auth_manager.read_disk_auth().is_some();
     if crate::agent::otel_gate::should_open_at_startup(crate::agent::otel_gate::StartupGate {
+        channel: crate::agent::otel_gate::resolved_policy_channel(),
         has_session,
-        has_api_key_env: crate::agent::auth_method::has_xai_api_key_env(),
         session_pending: crate::agent::otel_gate::is_session_pending(has_session, grok_com_config),
-        remote_fetch_enabled: crate::util::config::resolve_remote_fetch_enabled(),
     }) {
         crate::agent::otel_gate::open_at_startup();
     }
@@ -1183,10 +1157,8 @@ pub async fn run_leader(
     // ── Phase 6b: Legacy devbox auth migration ─────────────────────────────
     let auth: Option<GrokAuth> = migrate_devbox_auth_if_legacy(auth, &agent_config).await;
 
-    // Pure env-API-key leaders open external OTEL at readiness; any session
-    // (or a pending mint) keeps the gate closed until settings resolve. A
-    // mintable session-less leader also waits: cold-mint may produce a
-    // grok.com session post-readiness whose fleet policy governs
+    // A session-less leader that can still mint one (auth provider / devbox) will
+    // acquire a grok.com session post-readiness whose fleet policy governs
     // external OTEL; see the background cold-mint below.
     // Disk presence, not the is_xai-filtered no-mint result: an enterprise
     // session has remote policy and must keep the gate closed.
@@ -1197,13 +1169,19 @@ pub async fn run_leader(
             .is_some();
     let session_pending =
         crate::agent::otel_gate::is_session_pending(has_session, &agent_config.grok_com_config);
+    let policy_channel =
+        crate::agent::otel_gate::policy_channel_for(&agent_config.endpoints.proxy_url());
     if crate::agent::otel_gate::should_open_at_startup(crate::agent::otel_gate::StartupGate {
+        channel: policy_channel,
         has_session,
-        has_api_key_env: crate::agent::auth_method::has_xai_api_key_env(),
         session_pending,
-        remote_fetch_enabled: crate::util::config::resolve_remote_fetch_enabled(),
     }) {
-        info!("Pure env-API-key leader; opening external-OTEL gate (no remote policy applies)");
+        info!(
+            channel = ?policy_channel,
+            has_session,
+            session_pending,
+            "Opening external-OTEL gate at startup: no fleet policy is pending for this leader"
+        );
         crate::agent::otel_gate::open_at_startup();
     }
 
@@ -1594,7 +1572,7 @@ pub async fn run_leader(
                             models_manager_for_config.on_auth_changed().await;
                             let line = internal_reload_request_line(
                                 "config-auth-reloaded",
-                                "x.ai/internal/reload_all_mcp_servers",
+                                InternalMethod::ReloadAllMcpServers,
                                 serde_json::json!({}),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1606,7 +1584,7 @@ pub async fn run_leader(
                             auth_manager_for_config.clear_in_memory();
                             let line = internal_reload_request_line(
                                 "config-auth-cleared",
-                                "x.ai/internal/auth_cleared",
+                                InternalMethod::AuthCleared,
                                 serde_json::json!({}),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1625,7 +1603,7 @@ pub async fn run_leader(
                             info!("MCP server config change detected — reloading active sessions");
                             let line = internal_reload_request_line(
                                 "config-reload-mcp",
-                                "x.ai/internal/reload_all_mcp_servers",
+                                InternalMethod::ReloadAllMcpServers,
                                 serde_json::json!({}),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1648,7 +1626,7 @@ pub async fn run_leader(
                             );
                             let line = internal_reload_request_line(
                                 "config-reload-project-mcp",
-                                "x.ai/internal/reload_project_mcp_servers",
+                                InternalMethod::ReloadProjectMcpServers,
                                 serde_json::json!({ "cwd": cwd.to_string_lossy() }),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1663,7 +1641,7 @@ pub async fn run_leader(
                             info!("Model config change detected — reloading agent model list");
                             let line = internal_reload_request_line(
                                 "config-reload-models",
-                                "x.ai/internal/reload_models",
+                                InternalMethod::ReloadModels,
                                 serde_json::json!({}),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1689,7 +1667,7 @@ pub async fn run_leader(
                             info!("Models cache change detected — reloading agent model catalog");
                             let line = internal_reload_request_line(
                                 "config-reload-models-cache",
-                                "x.ai/internal/reload_models_cache",
+                                InternalMethod::ReloadModelsCache,
                                 serde_json::json!({}),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
@@ -1769,35 +1747,6 @@ pub async fn run_leader(
 
 #[cfg(test)]
 mod tests {
-
-    /// The external-OTEL gate opens at startup only for a pure env-API-key leader:
-    /// env key set, no session, no pending mint. Any session (resolved of any
-    /// credential type, or about to be minted) makes it wait for the fetch.
-    #[test]
-    fn otel_gate_opens_only_for_pure_env_api_key_leader() {
-        use crate::agent::otel_gate::{StartupGate, should_open_at_startup};
-        let opens = |has_session, has_api_key_env, session_pending| {
-            should_open_at_startup(StartupGate {
-                has_session,
-                has_api_key_env,
-                session_pending,
-                remote_fetch_enabled: true,
-            })
-        };
-        //         (has_session, has_api_key_env, session_pending)
-        assert!(opens(false, true, false), "pure env API key → opens");
-        assert!(!opens(true, true, false), "any resolved session → waits");
-        assert!(!opens(true, false, false), "session, no env key → waits");
-        assert!(
-            !opens(false, true, true),
-            "pending mint → session coming, waits"
-        );
-        assert!(!opens(false, false, false), "no credentials → waits");
-        assert!(
-            !opens(false, false, true),
-            "pending mint, no env key → waits"
-        );
-    }
 
     use super::*;
     use std::sync::atomic::AtomicU32;
@@ -2028,17 +1977,11 @@ mod tests {
         cancel.cancel();
     }
 
-    /// The watcher-injected internal reload requests must carry the ACP
-    /// wire-level `_` extension prefix. `agent-client-protocol`'s inbound
-    /// decoder routes non-built-in methods to `ext_method` only when
-    /// `_`-prefixed and rejects bare custom methods with `-32601`, so an
-    /// un-prefixed injection means every config-driven hot-reload silently
-    /// dies at decode (watcher logs fire, handlers never run).
     #[test]
-    fn internal_reload_request_line_uses_wire_ext_prefix() {
+    fn internal_reload_request_line_carries_id_params_and_newline() {
         let line = internal_reload_request_line(
             "config-reload-models",
-            "x.ai/internal/reload_models",
+            InternalMethod::ReloadModels,
             serde_json::json!({}),
         );
         assert!(line.ends_with('\n'), "must be a newline-terminated line");
@@ -2054,7 +1997,7 @@ mod tests {
         // Params must pass through verbatim (project-MCP reload carries cwd).
         let line = internal_reload_request_line(
             "config-reload-project-mcp",
-            "x.ai/internal/reload_project_mcp_servers",
+            InternalMethod::ReloadProjectMcpServers,
             serde_json::json!({ "cwd": "/repo/x" }),
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
@@ -2062,7 +2005,7 @@ mod tests {
 
         let line = internal_reload_request_line(
             "config-auth-cleared",
-            "x.ai/internal/auth_cleared",
+            InternalMethod::AuthCleared,
             serde_json::json!({}),
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();

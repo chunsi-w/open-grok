@@ -164,17 +164,20 @@ pub(crate) fn budget_recap_items(
 }
 
 /// Trailing normalization shared by [`build_recap_items`] and
-/// [`budget_recap_items`]: pop a trailing tool run — trailing `ToolResult`s or
+/// [`budget_recap_items`]: pop a trailing tool run — trailing `ToolResult`s,
 /// native `CustomToolOutput`s and any trailing `Assistant` with `tool_calls`
 /// (complete runs included) — so it ends on a clean boundary and the appended
 /// `User` instruction never follows a tool call or output.
+/// Trailing `Reasoning` goes too: it precedes its owner, which the pop just removed.
 pub(crate) fn pop_trailing_tool_run(items: &mut Vec<ConversationItem>) {
     while let Some(last) = items.last() {
         match last {
             ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
                 items.pop();
             }
-            ConversationItem::ToolResult(_) | ConversationItem::CustomToolOutput(_) => {
+            ConversationItem::ToolResult(_)
+            | ConversationItem::CustomToolOutput(_)
+            | ConversationItem::Reasoning(_) => {
                 items.pop();
             }
             _ => break,
@@ -196,6 +199,34 @@ pub(crate) fn main_turn_count(conversation: &[ConversationItem]) -> usize {
             )
         })
         .count()
+}
+
+/// Durable auto-recap watermark under `{session_dir}/`. Written only when a
+/// recap commits (success or long-tail suppress), never on failure/cancel.
+pub(crate) const RECAP_WATERMARK_FILE: &str = "last_recap_main_turn";
+
+/// Load the last committed recap main-turn watermark (`0` if missing/invalid).
+pub(crate) fn load_recap_watermark(session_dir: &std::path::Path) -> usize {
+    let path = session_dir.join(RECAP_WATERMARK_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the watermark after a successful/suppress commit. Best-effort.
+pub(crate) fn save_recap_watermark(session_dir: &std::path::Path, main_turns: usize) {
+    if !session_dir.is_dir() {
+        return;
+    }
+    let path = session_dir.join(RECAP_WATERMARK_FILE);
+    if let Err(e) = std::fs::write(&path, main_turns.to_string()) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "failed to persist recap watermark"
+        );
+    }
 }
 
 /// Manual: any `main_turns > 0`. Auto: new turn since `last`, min turns, idle.
@@ -456,6 +487,39 @@ mod tests {
             recap_gate(3, 3, true, false),
             Err("no new main turn since last recap")
         );
+    }
+
+    #[test]
+    fn recap_watermark_missing_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_recap_watermark(dir.path()), 0);
+    }
+
+    #[test]
+    fn recap_watermark_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        save_recap_watermark(dir.path(), 7);
+        assert_eq!(load_recap_watermark(dir.path()), 7);
+        save_recap_watermark(dir.path(), 3);
+        assert_eq!(load_recap_watermark(dir.path()), 3);
+    }
+
+    #[test]
+    fn recap_watermark_invalid_or_empty_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(RECAP_WATERMARK_FILE), "not-a-number").unwrap();
+        assert_eq!(load_recap_watermark(dir.path()), 0);
+        std::fs::write(dir.path().join(RECAP_WATERMARK_FILE), "  \n").unwrap();
+        assert_eq!(load_recap_watermark(dir.path()), 0);
+    }
+
+    #[test]
+    fn recap_watermark_save_skips_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-session");
+        // Must not panic; no file created under a non-existent parent path.
+        save_recap_watermark(&missing, 5);
+        assert!(!missing.join(RECAP_WATERMARK_FILE).exists());
     }
 
     #[test]

@@ -67,6 +67,11 @@ pub enum WorkspaceError {
         message: String,
     },
 
+    #[error("unknown workspace method: {0}")]
+    UnknownMethod(String),
+    #[error("workspace archive export failed: {0}")]
+    ExportArchiveLimitExceeded(String),
+
     /// GitHub export failure tagged with its wire class; see
     /// [`ExportGithubError`] for how the class crosses the workspace RPC boundary.
     ///
@@ -112,6 +117,8 @@ impl WorkspaceError {
             Self::HunkActionFailed(_) => "hunk_action_failed",
             Self::HubError(_) => "hub_error",
             Self::DeployError { kind, .. } => kind.wire_code(),
+            Self::UnknownMethod(_) => "unknown_method",
+            Self::ExportArchiveLimitExceeded(_) => "export_archive_limit_exceeded",
             Self::ExportGithub { kind, .. } => kind.wire_code(),
             Self::ShuttingDown => "shutting_down",
             Self::ToolsetExternallyOwned(_) => "toolset_externally_owned",

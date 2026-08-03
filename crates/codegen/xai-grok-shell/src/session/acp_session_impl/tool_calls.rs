@@ -1548,14 +1548,12 @@ impl SessionActor {
                     self.permissions.set_classifier_transcript(turns);
                 }
             }
-            let edit_path_context = matches!(&access_kind, AccessKind::Edit(_)).then(|| {
-                xai_grok_workspace::permission::types::EditPathContext {
-                    real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
-                    display_cwd: self
-                        .display_cwd
-                        .get()
-                        .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
-                }
+            let path_context = Some(xai_grok_workspace::permission::types::RequestPathContext {
+                real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
+                display_cwd: self
+                    .display_cwd
+                    .get()
+                    .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
             });
             let decision = {
                 let _pending_guard =
@@ -1567,10 +1565,10 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_edit_path_context(
+                    .request_with_path_context(
                         access_kind.clone(),
                         tool_call_update,
-                        edit_path_context,
+                        path_context,
                         Some(self.session_info.id.0.to_string()),
                         None,
                         None,
@@ -2125,19 +2123,24 @@ impl SessionActor {
                 Some(bash_tool.description.as_str()),
                 self.tool_context.cwd.as_path(),
             ),
-            ToolInput::ReadFile(read_file) => (
-                format!("Read `{}`", read_file.path.clone()),
-                acp::ToolKind::Read,
-                vec![
-                    // Same normalization as the canonical `_meta` input, so one
-                    // event can't show two start lines.
-                    acp::ToolCallLocation::new(read_file.path).line(
-                        xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
-                            .map(|l| l as u32),
-                    ),
-                ],
-                Vec::new(),
-            ),
+            ToolInput::ReadFile(read_file) => {
+                if let Some(skill) = self.skill_for_read_path(&read_file.path).await {
+                    self.emit_skill_md_read(skill);
+                }
+                (
+                    format!("Read `{}`", read_file.path),
+                    acp::ToolKind::Read,
+                    vec![
+                        // Same normalization as the canonical `_meta` input, so one
+                        // event can't show two start lines.
+                        acp::ToolCallLocation::new(read_file.path).line(
+                            xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
+                                .map(|l| l as u32),
+                        ),
+                    ],
+                    Vec::new(),
+                )
+            }
             ToolInput::ViewImage(view_image) => (
                 format!("View image `{}`", view_image.path.clone()),
                 acp::ToolKind::Read,
@@ -2254,6 +2257,7 @@ impl SessionActor {
                     xai_grok_telemetry::events::SkillDispatched {
                         skill_name: skill.skill.clone(),
                         plugin_source: None,
+                        trigger: xai_grok_telemetry::events::SkillTrigger::SkillTool,
                     },
                 );
                 tracing::info_span!(
@@ -2443,6 +2447,53 @@ impl SessionActor {
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_call_update), None)
             .await;
         Ok((title, kind, raw_input))
+    }
+    /// Resolves the path the way the read tool does, so `~` paths and forked sessions still match.
+    async fn skill_for_read_path(
+        &self,
+        path: &str,
+    ) -> Option<xai_grok_tools::implementations::skills::types::SkillInfo> {
+        let read_path = xai_grok_tools::types::resources::resolve_model_path(
+            self.tool_context.cwd.as_path(),
+            self.display_cwd.get().map(Path::new),
+            path,
+        );
+        if read_path.file_name().is_none_or(|name| name != "SKILL.md") {
+            return None;
+        }
+        let read_path = dunce::canonicalize(&read_path).unwrap_or(read_path);
+        let skills = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .clone()
+            .slash_skills()
+            .await;
+        skills.into_iter().find(|skill| {
+            crate::session::telemetry::is_same_skill_file(Path::new(&skill.path), &read_path)
+        })
+    }
+    fn emit_skill_md_read(&self, skill: xai_grok_tools::implementations::skills::types::SkillInfo) {
+        let skill_source = if skill.plugin_name.is_some() {
+            "plugin"
+        } else {
+            crate::session::telemetry::skill_source_label(
+                &skill.path,
+                self.session_info.cwd.as_str(),
+            )
+        };
+        tracing::info_span!(
+            "skill.activated",
+            skill_name = %skill.name,
+            invocation_trigger = "skill_md_read",
+            skill_source = skill_source,
+        )
+        .in_scope(|| {});
+        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SkillDispatched {
+            skill_name: skill.name,
+            plugin_source: skill.plugin_name,
+            trigger: xai_grok_telemetry::events::SkillTrigger::SkillMdRead,
+        });
     }
     async fn handle_tool_parse_error(
         &self,

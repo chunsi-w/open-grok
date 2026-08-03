@@ -151,6 +151,9 @@ pub enum Action {
     /// load effect; under `--chat`, local Build disk rows are refused in
     /// dispatch (never coerced).
     LoadSession(String, Option<std::path::PathBuf>, bool),
+    /// Welcome Local workspace ACK confirmed (y); write ack + start session.
+    #[cfg(feature = "local-workspace")]
+    ConfirmWelcomeLocalWorkspaceAck,
     /// Create a new session with a client-chosen session ID (`--session-id`).
     NewSessionWithId(String),
     /// Startup `--fork-session`: fork `parent` then load the child.
@@ -573,6 +576,10 @@ pub enum Action {
     /// drain site) and persists to `[ui].combine_queued_prompts` via
     /// `Effect::PersistSetting`.
     SetCombineQueuedPrompts(bool),
+    /// Mid-turn Enter steers (send-now) vs queues. SHARED-owned cache +
+    /// `[ui].enter_steers` via `Effect::PersistSetting`. Default off: Enter
+    /// queues and Ctrl+Enter sends now.
+    SetEnterSteers(bool),
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -918,13 +925,6 @@ pub enum Action {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DoctorFixCancelled(DoctorFixTarget),
-    /// User selected a project directory from the project picker.
-    ProjectSelected {
-        path: std::path::PathBuf,
-        stashed_prompt: String,
-        /// "Don't ask me again" was chosen: persist the opt-out.
-        disable_picker: bool,
-    },
     /// Persist the memory modal fullscreen preference to config.toml.
     PersistMemoryFullscreen(bool),
     /// Open the Agent Dashboard view (`/dashboard`, `Ctrl+\`, `open-grok dashboard`).
@@ -958,9 +958,12 @@ pub enum Action {
     DashboardCommitRename,
     /// Cancel an in-progress rename without committing.
     DashboardCancelRename,
-    /// Stop / kill the selected row (top-level: cancel turn → close;
-    /// subagent: kill). Double-press protected for top-level rows.
+    /// Ctrl+X on the selected row. Top-level: cancels a running turn on a
+    /// busy row, else double-press permanently deletes an idle row.
+    /// Subagent: kills the subagent.
     DashboardStop,
+    /// Confirm permanent delete of the armed dashboard row.
+    DashboardDelete,
     /// Cycle the dispatch input's mode for the next spawned agent
     /// (Normal → Plan → Always-Approve → Normal). Bound to Shift+Tab.
     DashboardCycleMode,
@@ -1278,7 +1281,11 @@ impl PlanModeKind {
     }
     /// Construct from a bool (the inverse of [`Self::to_bool`]).
     pub fn from_bool(b: bool) -> Self {
-        if b { Self::On } else { Self::Off }
+        if b {
+            Self::On
+        } else {
+            Self::Off
+        }
     }
 }
 /// Async side effect produced by [`super::dispatch::dispatch`].
@@ -1529,6 +1536,8 @@ pub enum AfterSessionDelete {
     Stay,
     /// `/delete` — return to welcome.
     Welcome,
+    /// Stay on the dashboard.
+    Dashboard,
 }
 #[derive(Debug)]
 pub enum Effect {
@@ -1642,7 +1651,7 @@ pub enum Effect {
         effort: Option<ReasoningEffort>,
         generation: u64,
     },
-    /// Change the process working directory (project-picker selection).
+    /// Change the process working directory (dashboard location picker, `/cd`).
     SetWorkingDir {
         path: std::path::PathBuf,
     },
@@ -1715,6 +1724,10 @@ pub enum Effect {
         /// the response is dropped when no longer current, so out-of-order
         /// completions can't clobber newer results.
         seq: u64,
+        /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
+        /// When set, stamped as `_meta["x.ai/facetFilters"].kind` so the shell
+        /// honors multi-source history under `--chat` instead of forcing chat-only.
+        kind_filter: Option<Vec<String>>,
     },
     /// Coalesce picker search keystrokes: fires
     /// [`TaskResult::SessionSearchDebounceExpired`] after a short sleep; the
@@ -1841,10 +1854,6 @@ pub enum Effect {
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen {
         fullscreen: bool,
-    },
-    /// Persist the project-picker opt-out to `[hints] project_picker_disabled`.
-    PersistProjectPickerDisabled {
-        disabled: bool,
     },
     /// Persist the dashboard's `[dashboard]` configuration to `~/.opengrok/config.toml`.
     /// Edge case 15: multi-pager safe via `config_toml_edit::read_config_document_for_edit`,

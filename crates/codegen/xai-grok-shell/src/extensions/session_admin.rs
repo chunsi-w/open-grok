@@ -7,6 +7,7 @@
 //! - `x.ai/session/rename`                  rename a session locally + remote
 //! - `x.ai/session/delete`                  delete a session locally + remote
 //! - `x.ai/session/update_mcp_servers`      mid-session MCP server swap
+//! - `x.ai/session/add_local_workspace`     mid-session local workspace add-only (chat)
 //! - `x.ai/session/fork`                    fork a session into a new one
 //! - `x.ai/internal/reload_all_mcp_servers` config hot-reload, all sessions
 //! - `x.ai/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
@@ -26,6 +27,7 @@ use serde::Deserialize;
 
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
+use crate::leader::protocol::InternalMethod;
 use crate::session::persistence::list_summaries;
 use crate::session::storage::StorageAdapter;
 use crate::session::storage::jsonl::JsonlStorageAdapter;
@@ -35,23 +37,40 @@ use xai_grok_telemetry::id::agent_id;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    if let Some(method) = InternalMethod::from_name(args.method.as_ref()) {
+        return handle_internal(agent, args, method).await;
+    }
     match args.method.as_ref() {
         "x.ai/session/rename" => handle_session_rename(agent, args).await,
         "x.ai/session/delete" => handle_session_delete(agent, args).await,
         "x.ai/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
+        #[cfg(feature = "local-workspace")]
+        "x.ai/session/add_local_workspace" => handle_add_local_workspace(agent, args).await,
         "x.ai/session/fork" => handle_session_fork(agent, args).await,
-        "x.ai/internal/reload_all_mcp_servers" => handle_reload_all_mcp_servers(agent).await,
-        "x.ai/internal/reload_project_mcp_servers" => {
-            handle_reload_project_mcp_servers(agent, args).await
-        }
-        "x.ai/internal/reload_skills" => handle_reload_skills(agent),
-        "x.ai/internal/reload_workflows" => handle_reload_workflows(agent),
-        "x.ai/internal/reload_models" => handle_reload_models(agent),
-        "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
-        "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
+    }
+}
+
+/// Exhaustive, so a new [`InternalMethod`] cannot compile without a handler.
+async fn handle_internal(
+    agent: &MvpAgent,
+    args: &acp::ExtRequest,
+    method: InternalMethod,
+) -> ExtResult {
+    match method {
+        InternalMethod::ReloadAllMcpServers => handle_reload_all_mcp_servers(agent).await,
+        InternalMethod::ReloadProjectMcpServers => {
+            handle_reload_project_mcp_servers(agent, args).await
+        }
+        InternalMethod::ReloadSkills => handle_reload_skills(agent),
+        InternalMethod::ReloadWorkflows => handle_reload_workflows(agent),
+        InternalMethod::ReloadModels => handle_reload_models(agent),
+        InternalMethod::ReloadModelsCache => handle_reload_models_cache(agent),
+        InternalMethod::AuthCleared => handle_auth_cleared(agent),
+        // Arrives as a notification, so it never reaches this request path.
+        InternalMethod::EvictSessions => Err(acp::Error::method_not_found()),
     }
 }
 
@@ -349,13 +368,18 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         (h, cwd)
     };
 
+    // Await managed first, then one compat snapshot for admit + merge so a
+    // settings reapply mid-await cannot make the seed and spawned set disagree.
     let managed = agent.get_managed_mcp_configs().await;
+    let compat = agent.cfg.borrow().compat_resolved;
+    let admitted =
+        crate::session::managed_mcp::admit_client_mcp_servers(params.mcp_servers, &cwd, &compat);
     let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-        params.mcp_servers.clone(),
+        admitted.clone(),
         &cwd,
         &managed,
         agent.plugin_registry_handle().snapshot().as_deref(),
-        &agent.cfg.borrow().compat_resolved,
+        &compat,
     );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -372,16 +396,51 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         .map_err(|_| acp::Error::internal_error().data("session closed"))?
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
-    // Persist the new client set on the handle so config hot-reloads
-    // (`reload_all_mcp_servers` / `reload_project_mcp_servers`) re-merge from
-    // the client's latest intent rather than the `session/new` snapshot —
-    // otherwise a reload would resurrect servers the client just removed
-    // (or drop ones it just added).
+    // Store the admitted (not raw) client set: hot-reloads re-merge from this
+    // seed, and a raw list would re-spawn a previously rejected vendor server
+    // once on-disk attribution vanishes.
     if let Some(h) = agent.sessions.borrow_mut().get_mut(&params.session_id) {
-        h.initial_client_mcp_servers = params.mcp_servers;
+        h.initial_client_mcp_servers = admitted;
     }
 
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+// session/add_local_workspace (add-only; local-workspace feature)
+
+#[cfg(feature = "local-workspace")]
+async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        session_id: acp::SessionId,
+        #[serde(default)]
+        meta: Option<acp::Meta>,
+    }
+
+    let params: Params = parse_params(args)?;
+    let cwd = {
+        let sessions = agent.sessions.borrow();
+        let h = sessions
+            .get(&params.session_id)
+            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        std::path::PathBuf::from(&h.info.cwd)
+    };
+    // Gate on actual chat kind — not `requires_gateway` (true for non-chat
+    // GatewayAttach; false for unknown ids).
+    if !agent.is_chat_kind_session(&params.session_id) {
+        return Err(acp::Error::invalid_params().data(serde_json::json!({
+            "code": "local_workspace_chat_only",
+            "message": "x.ai/session/add_local_workspace is only available on chat-kind sessions",
+        })));
+    }
+
+    let result = agent
+        .add_local_workspace_mid_session(&params.session_id, params.meta, &cwd)
+        .await?;
+    ExtMethodResult::success(result)
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

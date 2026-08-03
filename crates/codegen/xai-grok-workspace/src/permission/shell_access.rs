@@ -194,8 +194,13 @@ impl CompiledPolicy {
     ) -> Option<GateDecision> {
         let path = normalize_shell_path(token);
         let is_absolute = is_absolute_shell_path(&path);
+        // Cwd-aware rule match mirrors the direct Read/Edit tool gate, so a
+        // rooted rule like `Read(src/**)` also keys on the same file spelled
+        // absolutely. An unpinned cwd anchors nothing: relative operands then
+        // keep text-only matching (absolute operands are cwd-independent).
+        let rule_cwd = (is_absolute || !cwd_unpinned).then_some(cwd);
         // Escalate only: drop Allow so a file allow-rule can't auto-approve here.
-        let escalate = |access: &AccessKind| match self.evaluate(access) {
+        let escalate = |access: &AccessKind| match self.evaluate_with_cwd(access, rule_cwd) {
             Some(Decision::Reject(reason)) => Some(GateDecision::Reject(reason)),
             Some(Decision::Ask) => Some(GateDecision::AskRuleMatch),
             _ => None,
@@ -328,6 +333,7 @@ pub enum ProtectedEditReason {
     StartupFile,
     Etc,
     GrokConfig,
+    GrokSandbox,
     ClaudeSettings,
     CursorHooks,
     /// Fail-closed / unclassified sensitive path; no user copy yet.
@@ -343,6 +349,7 @@ impl ProtectedEditReason {
             Self::StartupFile => "startup_file",
             Self::Etc => "etc",
             Self::GrokConfig => "grok_config",
+            Self::GrokSandbox => "grok_sandbox",
             Self::ClaudeSettings => "claude_settings",
             Self::CursorHooks => "cursor_hooks",
             Self::Sensitive => "sensitive",
@@ -368,6 +375,9 @@ impl ProtectedEditReason {
             ),
             Self::GrokConfig => Some(
                 "Note: This edit contains changes to Open Grok config, which can alter permissions, tools, and other behavior in later sessions.",
+            ),
+            Self::GrokSandbox => Some(
+                "Note: This edit contains changes to the Open Grok sandbox config, which can loosen filesystem and network restrictions on commands.",
             ),
             Self::ClaudeSettings => Some(
                 "Note: This edit contains changes to Claude-compatible settings, which can install hooks or change permission mode without a separate execution approval.",
@@ -471,11 +481,8 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     if STARTUP_FILES.contains(&file) {
         return Some(ProtectedEditReason::StartupFile);
     }
-    // Dual-brand: protect both Open Grok (`.opengrok`) and legacy (`.grok`) config.
-    if string_components.ends_with(&[".opengrok", "config.toml"])
-        || string_components.ends_with(&[".grok", "config.toml"])
-    {
-        return Some(ProtectedEditReason::GrokConfig);
+    if let Some(reason) = protected_grok_config_file(path, &string_components) {
+        return Some(reason);
     }
     // Root-level `etc` (Unix `/etc/...` or Windows `X:\etc\...`). Component check
     // keeps classification correct when tests drive-prefix Unix-style paths.
@@ -488,23 +495,63 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     None
 }
 
+/// Open Grok config files that alter permissions (`config.toml`, the
+/// `managed_config.toml` defaults tier, the user `requirements.toml` layer) or
+/// sandbox restrictions (`sandbox.toml`) in the running and later sessions; a
+/// silent edit would let the agent loosen its own guardrails. Matched directly
+/// inside any `.opengrok` dir (user-global default and workspace overlays) and
+/// directly under a custom `$OPENGROK_HOME`, which the component match cannot see.
+fn protected_grok_config_file(path: &Path, components: &[&str]) -> Option<ProtectedEditReason> {
+    protected_grok_config_file_with_home(
+        path,
+        components,
+        xai_grok_config::user_grok_home().as_deref(),
+    )
+}
+
+fn protected_grok_config_file_with_home(
+    path: &Path,
+    components: &[&str],
+    user_grok_home: Option<&Path>,
+) -> Option<ProtectedEditReason> {
+    let reason = match components.last().copied() {
+        Some(
+            xai_grok_config::USER_CONFIG_FILENAME
+            | xai_grok_config::MANAGED_CONFIG_FILENAME
+            | xai_grok_config::REQUIREMENTS_FILENAME,
+        ) => ProtectedEditReason::GrokConfig,
+        Some("sandbox.toml") => ProtectedEditReason::GrokSandbox,
+        _ => return None,
+    };
+    let in_dot_grok = components.len() >= 2 && components[components.len() - 2] == ".opengrok";
+    let in_grok_home = || grok_home_matches(user_grok_home, |home| path.parent() == Some(home));
+    (in_dot_grok || in_grok_home()).then_some(reason)
+}
+
+/// True when `pred` holds for the user grok home in either its lexical or
+/// physically-resolved form. Both forms are checked because callers hold a
+/// lexical and a resolved candidate path, and the home itself may sit behind a
+/// symlink. The comparison is byte-exact (no case folding), like every other
+/// resolved-path check in this module.
+fn grok_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
+    home.is_some_and(|home| {
+        let lexical = xai_grok_paths::normalize_lexically(home);
+        pred(&lexical)
+            || resolve_following_symlinks(&lexical, 0).is_some_and(|resolved| pred(&resolved))
+    })
+}
+
 fn path_is_under_user_grok_hook_root(path: &Path, grok_home: &Path) -> bool {
     path.starts_with(grok_home.join("hooks")) || path == grok_home.join("hooks-paths")
 }
 
 fn protected_grok_hook_root(path: &Path, components: &[&str]) -> bool {
-    // Dual-brand path segments: `.opengrok` (Open Grok) and `.grok` (upstream).
     components
         .windows(2)
-        .any(|pair| matches!(pair, [".opengrok", "hooks"] | [".grok", "hooks"]))
+        .any(|pair| pair == [".opengrok", "hooks"])
         || components.ends_with(&[".opengrok", "hooks-paths"])
-        || components.ends_with(&[".grok", "hooks-paths"])
-        || xai_grok_config::user_grok_home().is_some_and(|grok_home| {
-            let lexical_home = xai_grok_paths::normalize_lexically(&grok_home);
-            path_is_under_user_grok_hook_root(path, &lexical_home)
-                || resolve_following_symlinks(&lexical_home, 0).is_some_and(|resolved_home| {
-                    path_is_under_user_grok_hook_root(path, &resolved_home)
-                })
+        || grok_home_matches(xai_grok_config::user_grok_home().as_deref(), |home| {
+            path_is_under_user_grok_hook_root(path, home)
         })
 }
 
@@ -1331,20 +1378,6 @@ mod tests {
         CompiledPolicy::new(PermissionConfig::new(rules))
     }
 
-    /// Unix-style `/…` paths are not absolute on Windows, so classification would
-    /// fail-closed to [`ProtectedEditReason::Sensitive`] before segment checks.
-    /// Prefix a drive letter so Normal components (`.opengrok`, `.git`, …) stay.
-    fn host_abs(unix_style: &str) -> PathBuf {
-        #[cfg(windows)]
-        {
-            PathBuf::from(format!("C:{unix_style}"))
-        }
-        #[cfg(not(windows))]
-        {
-            PathBuf::from(unix_style)
-        }
-    }
-
     fn cwd() -> &'static std::path::Path {
         std::path::Path::new("/work")
     }
@@ -1389,27 +1422,55 @@ mod tests {
     }
 
     #[test]
+    fn shell_gate_matches_cwd_relative_rules_on_absolute_operands() {
+        let deny = compiled(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Read,
+            "src/**",
+        )]);
+        // A rooted relative rule keys on the same file spelled absolutely,
+        // matching the direct Read tool gate (which evaluates with the cwd).
+        assert!(matches!(
+            deny.evaluate_shell_file_access_gate("cat /work/src/secret.txt", cwd()),
+            Some(GateDecision::Reject(_))
+        ));
+        // An absolute operand is cwd-independent, so it stays covered even
+        // after a `cd` unpins the working directory.
+        assert!(matches!(
+            deny.evaluate_shell_file_access_gate("cd /tmp && cat /work/src/secret.txt", cwd()),
+            Some(GateDecision::Reject(_))
+        ));
+        // Outside the working directory the rooted rule stays silent.
+        assert_eq!(
+            deny.evaluate_shell_file_access_gate("cat /elsewhere/src/secret.txt", cwd()),
+            None
+        );
+    }
+
+    #[test]
     fn sensitive_edit_targets_and_lexical_aliases_prompt() {
         for path in [
             "/home/user/.zshrc",
             "/etc",
             "/etc/grok-test",
             "/work/subdir/../.git/hooks/pre-commit",
+            "/home/user/.opengrok/sandbox.toml",
+            "/work/project/.opengrok/sandbox.toml",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_some(),
+                edit_target_protection(Path::new(path)).is_some(),
                 "protected edit target must prompt: {path}"
             );
         }
         for path in [
             "/work/src/main.rs",
             "/work/project/.opengrok/config.toml/backup",
-            "/work/project/.grok/config.toml/backup",
+            "/work/project/sandbox.toml",
+            "/work/project/requirements.toml",
+            "/work/project/managed_config.toml",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_none(),
+                edit_target_protection(Path::new(path)).is_none(),
                 "ordinary edit target should not prompt: {path}"
             );
         }
@@ -1423,9 +1484,8 @@ mod tests {
             "/work/.git/modules/outer/modules/inner/hooks/pre-commit",
             "/work/subdir/../.git/modules/foo/hooks/pre-commit",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_some(),
+                edit_target_protection(Path::new(path)).is_some(),
                 "submodule hook target must prompt: {path}"
             );
         }
@@ -1436,9 +1496,8 @@ mod tests {
             "/work/.git/modules/foo/hooks-disabled/pre-commit",
             "/work/src/modules/foo/hooks/pre-commit",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_none(),
+                edit_target_protection(Path::new(path)).is_none(),
                 "non-hook control must not prompt: {path}"
             );
         }
@@ -1451,10 +1510,6 @@ mod tests {
                 "/home/user/.opengrok/hooks/evil.json",
                 ProtectedEditReason::HookRoot,
             ),
-            (
-                "/home/user/.grok/hooks/evil.json",
-                ProtectedEditReason::HookRoot,
-            ),
             ("/work/.git/hooks/pre-commit", ProtectedEditReason::GitHooks),
             ("/home/user/.ssh/id_rsa", ProtectedEditReason::Ssh),
             ("/home/user/.zshrc", ProtectedEditReason::StartupFile),
@@ -1464,7 +1519,19 @@ mod tests {
                 ProtectedEditReason::GrokConfig,
             ),
             (
-                "/home/user/.grok/config.toml",
+                "/home/user/.opengrok/sandbox.toml",
+                ProtectedEditReason::GrokSandbox,
+            ),
+            (
+                "/work/project/.opengrok/sandbox.toml",
+                ProtectedEditReason::GrokSandbox,
+            ),
+            (
+                "/home/user/.opengrok/managed_config.toml",
+                ProtectedEditReason::GrokConfig,
+            ),
+            (
+                "/home/user/.opengrok/requirements.toml",
                 ProtectedEditReason::GrokConfig,
             ),
             (
@@ -1477,21 +1544,18 @@ mod tests {
             ),
         ];
         for (path, reason) in cases {
-            let p = host_abs(path);
-            assert_eq!(edit_target_protection(&p), Some(reason), "{path}");
+            assert_eq!(
+                edit_target_protection(Path::new(path)),
+                Some(reason),
+                "{path}"
+            );
             assert!(reason.description().is_some(), "{path}");
         }
         assert_eq!(
-            edit_target_protection(&host_abs("/home/user/project/src/main.rs")),
+            edit_target_protection(Path::new("/home/user/project/src/main.rs")),
             None
         );
         assert!(ProtectedEditReason::Sensitive.description().is_none());
-        assert!(
-            ProtectedEditReason::GrokConfig
-                .description()
-                .unwrap()
-                .contains("Open Grok")
-        );
     }
 
     #[test]
@@ -1500,33 +1564,26 @@ mod tests {
             "/home/user/.opengrok/hooks/evil.json",
             "/home/user/.opengrok/hooks/nested/deep.json",
             "/home/user/.opengrok/hooks-paths",
-            "/home/user/.grok/hooks/evil.json",
-            "/home/user/.grok/hooks-paths",
             "/home/user/.claude/settings.json",
             "/home/user/.claude/settings.local.json",
             "/home/user/.cursor/hooks.json",
             "/work/project/.opengrok/hooks/local.json",
             "/work/project/.opengrok/hooks-paths",
-            "/work/project/.grok/hooks/local.json",
-            "/work/project/.grok/hooks-paths",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_some(),
+                edit_target_protection(Path::new(path)).is_some(),
                 "hook root edit target must prompt: {path}"
             );
         }
         for path in [
             "/home/user/.opengrok/hooks-disabled/note.json",
             "/home/user/.opengrok/hooks-evil/note.json",
-            "/home/user/.grok/hooks-disabled/note.json",
             "/home/user/project/src/hooks.json",
             "/home/user/.claude/other.json",
             "/home/user/.cursor/settings.json",
         ] {
-            let p = host_abs(path);
             assert!(
-                edit_target_protection(&p).is_none(),
+                edit_target_protection(Path::new(path)).is_none(),
                 "ordinary edit target should not prompt: {path}"
             );
         }
@@ -1597,6 +1654,85 @@ mod tests {
                 "symlinked protected edit target must prompt: {}",
                 path.display()
             );
+        }
+    }
+
+    /// A custom `$OPENGROK_HOME` has no `.opengrok` path component, so the live
+    /// `config.toml` / `sandbox.toml` must be caught by the home-prefix branch.
+    #[test]
+    fn grok_config_files_under_custom_grok_home_are_protected() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path();
+        for (file, reason) in [
+            ("config.toml", ProtectedEditReason::GrokConfig),
+            ("managed_config.toml", ProtectedEditReason::GrokConfig),
+            ("requirements.toml", ProtectedEditReason::GrokConfig),
+            ("sandbox.toml", ProtectedEditReason::GrokSandbox),
+        ] {
+            let path = home_path.join(file);
+            let components = [file];
+            assert_eq!(
+                protected_grok_config_file_with_home(&path, &components, Some(home_path)),
+                Some(reason),
+                "{file} directly under $OPENGROK_HOME must be protected"
+            );
+        }
+        // Same file names elsewhere (or with no resolvable home) stay ordinary.
+        let elsewhere = home_path.join("sub").join("sandbox.toml");
+        assert_eq!(
+            protected_grok_config_file_with_home(
+                &elsewhere,
+                &["sub", "sandbox.toml"],
+                Some(home_path)
+            ),
+            None
+        );
+        assert_eq!(
+            protected_grok_config_file_with_home(
+                &home_path.join("sandbox.toml"),
+                &["sandbox.toml"],
+                None
+            ),
+            None
+        );
+    }
+
+    /// The resolved-symlink arm of the grok-home match must decide: `$OPENGROK_HOME`
+    /// points at a symlink while the edit targets the physical home directory,
+    /// so the lexical parent-equality arm cannot fire.
+    #[test]
+    #[cfg(unix)]
+    fn grok_config_under_symlinked_grok_home_is_protected() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real_home = tmp.path().join("real-home");
+        std::fs::create_dir(&real_home).unwrap();
+        let link = tmp.path().join("home-link");
+        symlink(&real_home, &link).unwrap();
+        // tempdir paths can themselves contain symlinks (macOS /var -> /private/var);
+        // compare against the physical home the production resolver will produce.
+        let physical_home = resolve_following_symlinks(&real_home, 0).unwrap();
+        assert_eq!(
+            protected_grok_config_file_with_home(
+                &physical_home.join("sandbox.toml"),
+                &["sandbox.toml"],
+                Some(&link)
+            ),
+            Some(ProtectedEditReason::GrokSandbox)
+        );
+    }
+
+    /// `protected_edit_reason` lowercases path components before matching, so
+    /// the canonical filename constants must stay lowercase or the const
+    /// patterns silently stop firing.
+    #[test]
+    fn protected_config_filename_constants_are_lowercase() {
+        for name in [
+            xai_grok_config::USER_CONFIG_FILENAME,
+            xai_grok_config::MANAGED_CONFIG_FILENAME,
+            xai_grok_config::REQUIREMENTS_FILENAME,
+        ] {
+            assert_eq!(name, name.to_ascii_lowercase(), "{name}");
         }
     }
 

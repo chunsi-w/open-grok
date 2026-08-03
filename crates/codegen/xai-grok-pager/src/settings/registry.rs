@@ -699,6 +699,9 @@ pub fn current_value_for(
         "combine_queued_prompts" => Some(SettingValue::Bool(
             crate::appearance::cache::load_combine_queued_prompts(),
         )),
+        "enter_steers" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_enter_steers(),
+        )),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         "swarm_mode" => Some(SettingValue::Bool(ui.swarm_mode.unwrap_or(false))),
         "antigravity_subagents" => Some(SettingValue::Bool(
@@ -1120,6 +1123,13 @@ mod tests {
                         *default,
                         ui.combine_queued_prompts.unwrap_or(false),
                         "combine_queued_prompts default drifts from UiConfig::default()"
+                    );
+                }
+                ("enter_steers", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.enter_steers_enabled(),
+                        "enter_steers default drifts from UiConfig::default()"
                     );
                 }
                 ("simple_mode", SettingKind::Bool { default }) => {

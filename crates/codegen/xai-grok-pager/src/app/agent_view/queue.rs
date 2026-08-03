@@ -1260,6 +1260,33 @@ mod queue_edit_routing_tests {
         assert_eq!(agent.prompt.text(), "");
     }
 
+    /// `[ui].enter_steers = true`: mid-turn Enter sends now; Ctrl+Enter queues.
+    #[test]
+    fn enter_steers_swaps_enter_and_ctrl_enter_mid_turn() {
+        crate::appearance::cache::set_enter_steers(true);
+        let mut agent = make_running_agent();
+        agent.prompt.set_text("steer now");
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        match agent.handle_prompt_key_for_test(&enter) {
+            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+                assert_eq!(text, "steer now");
+            }
+            other => panic!("enter_steers: Enter must send-now, got {other:?}"),
+        }
+        assert_eq!(agent.prompt.text(), "");
+
+        agent.prompt.set_text("queue instead");
+        match agent.handle_prompt_key_for_test(&force_interject_key()) {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "queue instead");
+            }
+            other => panic!("enter_steers: Ctrl+Enter must queue, got {other:?}"),
+        }
+
+        crate::appearance::cache::set_enter_steers(false);
+    }
+
     /// Idle interject key: with no running turn there's nothing to interject
     /// into — the key is a no-op (does not send like Enter).
     #[test]

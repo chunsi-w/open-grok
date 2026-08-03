@@ -2,6 +2,15 @@ pub(crate) mod lsp_runtime;
 
 pub(crate) const TEST_MODEL: &str = "test-model";
 
+/// Keep this crate's unit-test binary from writing synthetic events into
+/// the real unified log; pre-main so the redirect beats the lazily-opened
+/// writer. Integration binaries under `tests/` isolate via `TestSandbox`
+/// homes instead.
+#[ctor::ctor]
+fn redirect_unified_log_for_tests() {
+    xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
+}
+
 /// Pre-main guard: point `OPENGROK_HOME` at a per-process temp directory so
 /// unit tests can never touch the real `~/.opengrok`.
 ///
@@ -14,7 +23,7 @@ pub(crate) const TEST_MODEL: &str = "test-model";
 /// rather than a per-test helper. An explicitly exported `OPENGROK_HOME` is
 /// respected (that's a deliberate operator choice). Pre-main runs
 /// single-threaded, which is what makes `set_var` sound here.
-#[ctor::ctor(unsafe)]
+#[ctor::ctor]
 fn isolate_grok_home_from_real_home() {
     if std::env::var_os("OPENGROK_HOME").is_none() {
         let dir = std::env::temp_dir().join(format!("opengrok-test-home-{}", std::process::id()));

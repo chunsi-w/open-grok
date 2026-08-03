@@ -6,8 +6,8 @@
 //! payloads come from `xai_grok_test_support::sse`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use axum::Router;
@@ -53,8 +53,26 @@ impl MockServer {
                 })
                 .await;
         });
-        // Give the server a moment to start.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // `TcpListener::bind` listens immediately, so a bare TCP connect is
+        // not readiness. Fixed sleeps also race under parallel load: the
+        // accept loop isn't polled yet, the first sampling request hangs,
+        // and drains time out with 0 events. Wait for any HTTP response
+        // (404 is fine) so `axum::serve` has entered accept.
+        let probe = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .expect("mock readiness client");
+        let ready_url = format!("http://{addr}/");
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match probe.get(&ready_url).send().await {
+                Ok(_response) => break,
+                Err(_) if tokio::time::Instant::now() < ready_deadline => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(err) => panic!("mock server failed to become ready at {addr}: {err}"),
+            }
+        }
         Self { addr, shutdown_tx }
     }
 
@@ -71,7 +89,25 @@ impl MockServer {
 // Config + request helpers
 // ---------------------------------------------------------------------------
 
+/// Isolate this binary from the process-wide shared `reqwest` pools.
+///
+/// Parallel axum mocks + `SHARED_H2` reuse hangs as drain timeouts with 0
+/// events (`submit_emits_*`, `auth_401_*`, cancel/concurrent). The kill
+/// switch is the supported escape hatch (`shared_http_kill_switch`); only
+/// set it when unset so CI/ambient overrides still win. Must run before
+/// the first `SamplingClient` build (latches `sharing_disabled`).
+fn disable_shared_sampler_client_for_tests() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        if std::env::var_os("GROK_SAMPLER_SHARED_CLIENT").is_none() {
+            // SAFETY: test binary init; no other threads have read the latch yet.
+            unsafe { std::env::set_var("GROK_SAMPLER_SHARED_CLIENT", "0") };
+        }
+    });
+}
+
 fn test_config(base_url: String, model: &str) -> SamplerConfig {
+    disable_shared_sampler_client_for_tests();
     SamplerConfig {
         api_key: Some("test-key".into()),
         base_url,
@@ -86,7 +122,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         query_params: IndexMap::new(),
         env_http_headers: IndexMap::new(),
         context_window: 128_000,
-        force_http1: false,
+        // Axum mocks speak cleartext HTTP/1.1; keep the fallback path simple.
+        force_http1: true,
         // Keep retries minimal so tests don't take forever.
         max_retries: Some(2),
         stream_tool_calls: false,

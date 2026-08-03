@@ -802,6 +802,16 @@ async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
             "got: {err}",
         );
 }
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_enter_steers() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("enter_steers", SettingValue::String("nope".into())).await;
+    let err = r.expect_err("enter_steers with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(enter_steers) expected Bool"),
+        "got: {err}",
+    );
+}
 /// Type-mismatch for `simple_mode`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_simple_mode() {
@@ -1572,6 +1582,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("hit".into()),
         seq: 7,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
@@ -1588,6 +1599,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: None,
         seq: 8,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1603,6 +1615,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("fail-me".into()),
         seq: 9,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListFailed { error, seq, query } => {
@@ -2193,10 +2206,7 @@ fn format_session_info_session_auth_ignores_api_key_env() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, true);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");
@@ -2207,41 +2217,33 @@ fn format_session_info_api_key_without_env() {
     let text = format_session_info(&info, None, false, true, false);
     assert!(text.contains("Auth method: API key\n"), "{text}");
     assert!(!text.contains("XAI_API_KEY"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
-    assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `open-grok login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_api_key_auth_notes_console_billing() {
+fn format_session_info_api_key_auth_suggests_grok_login() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, true, true);
     assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
-    assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `open-grok login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_session_only_manage_at_grok_com() {
+fn format_session_info_session_only_shows_oauth() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");

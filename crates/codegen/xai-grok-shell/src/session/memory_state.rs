@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
 /// Memory subsystem state for a session.
-pub struct SessionMemory {
+pub(crate) struct SessionMemory {
     /// Provider active when the memory backend was created. Embeddings may use
     /// an independently resolved xAI route even when chat runs on Codex.
     pub embedding_provider: xai_grok_sampling_types::ModelProvider,
@@ -75,7 +75,7 @@ impl SessionMemory {
 
     /// Attempt to acquire the flush lock. Returns `true` if acquired,
     /// `false` if another flush is already in progress.
-    pub fn try_acquire_flush_lock(&self) -> bool {
+    pub(crate) fn try_acquire_flush_lock(&self) -> bool {
         self.is_flushing
             .compare_exchange(
                 false,
@@ -87,7 +87,7 @@ impl SessionMemory {
     }
 
     /// Release the flush lock.
-    pub fn release_flush_lock(&self) {
+    pub(crate) fn release_flush_lock(&self) {
         self.is_flushing
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -97,7 +97,7 @@ impl SessionMemory {
     /// Matches the original three-way logic: "written" increments success,
     /// "error" increments error, anything else ("nothing_to_store", "rejected")
     /// increments only the total flush count.
-    pub fn record_flush_result(&self, outcome: &str) {
+    pub(crate) fn record_flush_result(&self, outcome: &str) {
         self.flush_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match outcome {
@@ -114,7 +114,7 @@ impl SessionMemory {
     }
 
     /// Record a dream consolidation result.
-    pub fn record_dream_result(&self, success: bool) {
+    pub(crate) fn record_dream_result(&self, success: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         self.dream_count.fetch_add(1, Relaxed);
         if success {
@@ -125,7 +125,7 @@ impl SessionMemory {
     }
 
     /// Record a neutral dream outcome (nothing to consolidate / skipped).
-    pub fn record_dream_neutral(&self) {
+    pub(crate) fn record_dream_neutral(&self) {
         self.dream_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -154,7 +154,7 @@ impl SessionMemory {
     }
 
     /// Reindex a file and embed new chunks when embedding is configured.
-    pub async fn reindex_and_embed(&self, path: &std::path::Path, source: &str) {
+    pub(crate) async fn reindex_and_embed(&self, path: &std::path::Path, source: &str) {
         let Some(storage) = self.storage() else {
             return;
         };
@@ -173,7 +173,7 @@ impl SessionMemory {
     /// Used after dream consolidation deletes processed session files so
     /// that stale chunks don't linger in the index. Best-effort: errors
     /// are logged but don't propagate.
-    pub fn delete_paths_from_index(&self, paths: &[std::path::PathBuf]) {
+    pub(crate) fn delete_paths_from_index(&self, paths: &[std::path::PathBuf]) {
         if paths.is_empty() {
             return;
         }
@@ -229,7 +229,7 @@ impl SessionMemory {
 }
 
 /// Snapshot of memory telemetry counters for session-end logging.
-pub struct MemoryTelemetry {
+pub(crate) struct MemoryTelemetry {
     pub flush_count: u64,
     pub flush_success_count: u64,
     pub flush_error_count: u64,

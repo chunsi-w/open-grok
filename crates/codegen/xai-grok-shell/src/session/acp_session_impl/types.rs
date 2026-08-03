@@ -12,6 +12,20 @@ pub(crate) enum McpReminderMode {
     Full,
 }
 
+/// Which credential store a successful 401 recovery minted into. An
+/// uncharged resubmit can only usefully wait on the store that recovered:
+/// waiting on the session token for a provider-key 401 blocks 15s for a
+/// refresh that is irrelevant to the rejected credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveredStore {
+    /// `AuthManager` session token (devbox re-mint, OIDC refresh) —
+    /// `wait_for_token_refresh` is meaningful.
+    SessionToken,
+    /// Auth-provider key minted into chat-state credentials — nothing to
+    /// wait on in the `AuthManager`; floor-pace instead.
+    AuthProvider,
+}
+
 /// Recovery decision returned by
 /// `SessionActor::handle_sampling_failure` for the sampler-based
 /// turn loop.
@@ -19,11 +33,16 @@ pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded (devbox re-mint, OIDC refresh, or auth
-    /// provider re-mint). The turn loop should resubmit once with the
-    /// fresh token.
+    /// Auth 401 recovery succeeded; the turn loop should resubmit with the
+    /// fresh token. `credential` is the wire provenance of the rejected
+    /// request: a 401 for a request that carried no credential at all (a
+    /// fail-closed send) must not be charged against the per-incident
+    /// auth-retry budget. `provider` is the fork's model-provider gate so
+    /// Codex/Kimi/Fireworks/DeepSeek/Wafer refresh policy stays isolated.
     RefreshAuthAndResubmit {
         provider: xai_grok_sampling_types::ModelProvider,
+        credential: xai_grok_sampling_types::SentCredential,
+        store: RecoveredStore,
     },
 }
 
@@ -38,9 +57,12 @@ pub(crate) enum SamplerTurnOutcome {
         Box<xai_grok_sampler::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
-    /// Auth recovery succeeded; the outer loop should retry once.
+    /// Auth recovery succeeded; the outer loop should retry. Mirrors
+    /// [`SamplerFailureRecovery::RefreshAuthAndResubmit`].
     RefreshAuthAndResubmit {
         provider: xai_grok_sampling_types::ModelProvider,
+        credential: xai_grok_sampling_types::SentCredential,
+        store: RecoveredStore,
     },
 }
 

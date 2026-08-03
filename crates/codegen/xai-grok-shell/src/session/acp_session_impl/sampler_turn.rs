@@ -134,7 +134,14 @@ impl SessionTokenAuthGate {
             is_session_based: auth_method_id
                 .is_some_and(crate::agent::auth_method::is_session_based_method),
             model_byok,
-            endpoint_is_first_party: crate::util::is_xai_api_url(base_url),
+            // Fork gate requires a first-party host even for `NotByok` (session
+            // tokens must not cross to custom endpoints). Integration tests that
+            // drive a loopback mock can opt in via
+            // [`trust_loopback_session_auth_for_tests`].
+            endpoint_is_first_party: crate::util::is_xai_api_url(base_url)
+                || (cfg!(test)
+                    && trust_loopback_session_auth_for_tests_enabled()
+                    && is_loopback_base_url(base_url)),
         }
     }
     fn active(self) -> bool {
@@ -143,6 +150,55 @@ impl SessionTokenAuthGate {
             self.model_byok,
             self.endpoint_is_first_party,
         )
+    }
+}
+
+/// Opt-in for shell integration tests that exercise session-token 401 recovery
+/// against a loopback mock. Production and default test builds keep the fork
+/// first-party gate closed for loopback.
+///
+/// Ref-counted (not a bare bool) so parallel `#[test]`s that each enable the
+/// hook cannot clear it out from under each other on Drop — that race made
+/// `fail_closed_401_is_uncharged_and_turn_survives` surface Unauthorized
+/// instead of recovering when `authenticated_401s_*` finished first.
+#[cfg(test)]
+static TRUST_LOOPBACK_SESSION_AUTH_FOR_TESTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn trust_loopback_session_auth_for_tests(trust: bool) {
+    use std::sync::atomic::Ordering;
+    if trust {
+        TRUST_LOOPBACK_SESSION_AUTH_FOR_TESTS.fetch_add(1, Ordering::SeqCst);
+    } else {
+        let _ = TRUST_LOOPBACK_SESSION_AUTH_FOR_TESTS.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |v| Some(v.saturating_sub(1)),
+        );
+    }
+}
+
+fn trust_loopback_session_auth_for_tests_enabled() -> bool {
+    #[cfg(test)]
+    {
+        TRUST_LOOPBACK_SESSION_AUTH_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+fn is_loopback_base_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
 }
 
@@ -1163,6 +1219,63 @@ impl SessionActor {
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
+    /// Fold an auth remedy into a turn failure: its advice becomes the tail of
+    /// the message, and its `turn_error_type` the classification the client
+    /// keys its re-auth prompt off.
+    fn apply_auth_remedy(
+        &self,
+        remedy: &crate::auth::AuthRemedy,
+        message: String,
+        status_code: Option<u16>,
+    ) -> (&'static str, String) {
+        xai_grok_telemetry::unified_log::info(
+            "auth: turn failure classified",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "status_code": status_code,
+                "remedy": format!("{remedy:?}"),
+            })),
+        );
+        let message = match remedy.advice() {
+            Some(advice) => format!("{message}\n\n{advice}"),
+            None => message,
+        };
+        (remedy.turn_error_type(), message)
+    }
+    /// Terminal failure for a turn the auth-retry budget gave up on — the one
+    /// terminal path that lives outside [`Self::handle_sampling_failure`].
+    ///
+    /// Every terminal path owes the client one `RetryState::Failed`: it is
+    /// what raises the pager's re-auth prompt and its turn-failed block. This
+    /// arm used to return its `acp::Error` without one, so a turn that died on
+    /// repeated 401s ended in silence.
+    pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
+        const STATUS: Option<u16> = Some(401);
+        let (error_type, message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) => self.apply_auth_remedy(
+                &auth_manager.auth_remedy().after_retries_exhausted(),
+                message,
+                STATUS,
+            ),
+            None => ("auth", message),
+        };
+        self.log_terminal_failure(
+            error_type,
+            STATUS,
+            &message,
+            xai_grok_sampling_types::ModelProvider::Xai,
+        );
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: error_type.to_owned(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        acp::Error::internal_error().data(crate::sampling::error::error_data_with_status(
+            message, STATUS,
+        ))
+    }
     fn log_terminal_failure(
         &self,
         error_type: &str,
@@ -1441,6 +1554,8 @@ impl SessionActor {
                         self.prepare_sampler_for_turn().await;
                         return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                             provider: request_provider,
+                            credential: error.credential,
+                            store: RecoveredStore::AuthProvider,
                         });
                     }
                     tracing::warn!(
@@ -1465,37 +1580,6 @@ impl SessionActor {
         }
         if auth_recovery_eligible
             && request_provider == xai_grok_sampling_types::ModelProvider::Xai
-            && crate::auth::devbox_login::is_devbox_environment()
-            && let Some(ref am) = self.auth_manager
-        {
-            match am.try_devbox_recovery().await {
-                Ok(auth) => {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        user_id = %auth.user_id,
-                        "auth recovery: sampler 401, devbox re-mint, retrying"
-                    );
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        provider: request_provider,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %self.session_info.id.0,
-                        error = %e,
-                        "auth recovery: sampler 401, devbox re-mint failed"
-                    );
-                    xai_grok_telemetry::unified_log::warn(
-                        "auth recovery: sampler 401, devbox re-mint failed",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({ "error": format!("{e}") })),
-                    );
-                }
-            }
-        }
-        if auth_recovery_eligible
-            && request_provider == xai_grok_sampling_types::ModelProvider::Xai
             && let Some(ref am) = self.auth_manager
         {
             if am
@@ -1511,6 +1595,8 @@ impl SessionActor {
                 self.prepare_sampler_for_turn().await;
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                     provider: request_provider,
+                    credential: error.credential,
+                    store: RecoveredStore::SessionToken,
                 });
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
@@ -1526,6 +1612,8 @@ impl SessionActor {
             self.prepare_sampler_for_turn().await;
             return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                 provider: request_provider,
+                credential: error.credential,
+                store: RecoveredStore::AuthProvider,
             });
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
@@ -1560,7 +1648,7 @@ impl SessionActor {
         let auth_mode = self
             .auth_manager
             .as_ref()
-            .and_then(|am| am.current())
+            .and_then(|am| am.current_or_expired())
             .map(|a| a.auth_mode)
             .unwrap_or(crate::auth::AuthMode::ApiKey);
         let auth_mode_str = if request_provider == xai_grok_sampling_types::ModelProvider::Codex {
@@ -1648,28 +1736,13 @@ impl SessionActor {
         } else {
             error.kind.as_str()
         };
-        let (error_type, detailed_message) = if error_type == "auth"
-            && self
-                .auth_manager
-                .as_ref()
-                .is_some_and(|am| !am.requires_manual_reauth())
-        {
-            xai_grok_telemetry::unified_log::info(
-                "auth: turn failure downgraded to auth_transient (refreshable credential present)",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "status_code": error.status_code })),
-            );
-            (
-                "auth_transient",
-                format!(
-                    "{detailed_message}\n\nAuthentication is temporarily unavailable \
-                     (often a network blip right after wake). Your session is still \
-                     signed in and will recover automatically — retry in a few seconds; \
-                     no need to run /login."
-                ),
-            )
-        } else {
-            (error_type, detailed_message)
+        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
+                &auth_manager.auth_remedy(),
+                detailed_message,
+                error.status_code,
+            ),
+            _ => (error_type, detailed_message),
         };
         self.log_terminal_failure(
             error_type,
@@ -1763,9 +1836,15 @@ impl SessionActor {
                     SamplerFailureRecovery::CompactAndResubmit => {
                         Ok(SamplerTurnOutcome::CompactAndResubmit)
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit { provider } => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { provider })
-                    }
+                    SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        provider,
+                        credential,
+                        store,
+                    } => Ok(SamplerTurnOutcome::RefreshAuthAndResubmit {
+                        provider,
+                        credential,
+                        store,
+                    }),
                 }
             }
         }
@@ -2081,6 +2160,29 @@ impl SessionActor {
 
 fn session_codex_multi_agent_v2(model_supports_policy: bool, session_policy_enabled: bool) -> bool {
     model_supports_policy && session_policy_enabled
+}
+
+#[cfg(test)]
+mod loopback_trust_tests {
+    use super::{
+        trust_loopback_session_auth_for_tests, trust_loopback_session_auth_for_tests_enabled,
+    };
+
+    #[test]
+    fn nested_enables_survive_partial_disable() {
+        // Other parallel tests may already hold permits; assert nesting only.
+        let before = trust_loopback_session_auth_for_tests_enabled();
+        trust_loopback_session_auth_for_tests(true);
+        trust_loopback_session_auth_for_tests(true);
+        assert!(trust_loopback_session_auth_for_tests_enabled());
+        trust_loopback_session_auth_for_tests(false);
+        assert!(
+            trust_loopback_session_auth_for_tests_enabled(),
+            "first Drop must not clear a still-active nested enable"
+        );
+        trust_loopback_session_auth_for_tests(false);
+        assert_eq!(trust_loopback_session_auth_for_tests_enabled(), before);
+    }
 }
 
 #[cfg(test)]

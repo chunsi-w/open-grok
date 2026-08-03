@@ -266,6 +266,7 @@ impl SessionActor {
                 xai_grok_telemetry::events::SkillDispatched {
                     skill_name: sk.name.clone(),
                     plugin_source: sk.plugin_name.clone(),
+                    trigger: xai_grok_telemetry::events::SkillTrigger::SlashCommand,
                 },
             );
         }

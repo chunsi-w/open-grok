@@ -292,7 +292,7 @@ impl ModelGlobSet {
 /// `find_model_by_id`/`models()` and ignore `user_selectable`, so they need no
 /// exemption. Globs are validated at load (`Config::validate_model_filters`);
 /// the arms here fail closed if one slips through.
-pub fn resolve_model_catalog(
+pub(crate) fn resolve_model_catalog(
     cfg: &config::Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {

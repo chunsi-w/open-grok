@@ -68,7 +68,7 @@ Alias: `/exit`. To leave the current session but stay in Grok, use `/home` to re
 /delete
 ```
 
-Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume`, press `d` then `y` on a row to delete a session you are not currently in.
+Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
 
 ---
 
@@ -180,7 +180,7 @@ This shows:
 
 - Session title (when set)
 - Shell version
-- Auth method (OAuth vs API key) and where to manage account and credits (https://grok.com/?_s=billing for OAuth, console.x.ai for API key; API-key sessions also suggest `grok login` for SuperGrok)
+- Auth method (OAuth vs API key; API-key sessions also suggest `open-grok login` for SuperGrok)
 - Session ID
 - Working directory
 - Model (with a model hash for coding models)

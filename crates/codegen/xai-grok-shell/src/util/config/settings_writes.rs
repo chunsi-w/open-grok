@@ -200,6 +200,11 @@ pub async fn set_combine_queued_prompts(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.combine_queued_prompts = Some(value)).await
 }
 
+/// Persist `[ui].enter_steers` via `update_config`.
+pub async fn set_enter_steers(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.enter_steers = Some(value)).await
+}
+
 /// Persist `[ui].simple_mode` via `update_config`. Same `Option<bool>`
 /// shape as `show_timestamps`.
 pub async fn set_simple_mode(value: bool) -> Result<()> {

@@ -1179,9 +1179,16 @@ impl ToolRegistryBuilder {
                     desc,
                     &client_name,
                     crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                    xai_tool_types::max_wait_block_ms(),
                 ));
             }
             renderer.render_schema_descriptions(&mut definition.function.parameters);
+            truncation_config.apply_to_schema(
+                &mut definition.function.parameters,
+                &client_name,
+                crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                xai_tool_types::max_wait_block_ms(),
+            );
             (entry.apply_params)(&effective_params, &mut resources);
             tools.push(FinalizedTool {
                 namespace: entry.namespace,
@@ -1335,6 +1342,13 @@ impl FinalizedToolset {
             )),
             system_reminder_tag: "system-reminder",
             workspace_viewer_ctx: None,
+        }
+    }
+    /// Whether the server must await this tool's in-process cancellation cleanup.
+    pub fn cooperative_cancellation(&self, tool_name: &str) -> bool {
+        {
+            let _ = tool_name;
+            false
         }
     }
     /// Get all tool definitions to send to the client.
@@ -2411,6 +2425,10 @@ mod tests {
             collect_descriptions(&def.function.parameters, &mut field_descs);
             for field_desc in &field_descs {
                 assert_no_render_whitespace_artifacts(name, field_desc);
+                assert!(
+                    !field_desc.contains("{max_"),
+                    "{name}: unresolved {{max_*}} placeholder in a field description"
+                );
             }
         }
     }
@@ -3417,6 +3435,119 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn non_pi_finalized_contract_snapshot_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        ToolConfig::for_tool::<grok_build::TodoWriteTool>(),
+                        ToolConfig::for_tool::<opencode::OpenCodeWriteTool>(),
+                    ],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .unwrap();
+        let mut contracts: Vec<serde_json::Value> = toolset
+            .tool_definitions()
+            .into_iter()
+            .map(|definition| {
+                serde_json::json!({
+                    "name": definition.function.name,
+                    "description": definition.function.description,
+                    "parameters": definition.function.parameters,
+                })
+            })
+            .collect();
+        contracts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let expected: serde_json::Value = serde_json::from_str(
+                r##"
+        [
+          {
+            "name": "todo_write",
+            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.",
+            "parameters": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "todos"
+              ],
+              "type": "object",
+              "properties": {
+                "merge": {
+                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "todos": {
+                  "description": "Array of todo items to write to the workspace",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "description": "Unique identifier for the todo item",
+                        "type": "string"
+                      },
+                      "content": {
+                        "description": "The description/content of the todo item",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "status": {
+                        "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "pending",
+                          "in_progress",
+                          "completed",
+                          "cancelled",
+                          null
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "write",
+            "description": "Create or overwrite a file.\n\n- Writing to an existing path replaces the file.\n- Parent directories are created for you.",
+            "parameters": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "file_path",
+                "content"
+              ],
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to write.",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "The full file content to write.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        ]
+"##,
+            )
+            .expect("checked-in snapshot parses");
+        assert_eq!(expected, serde_json::Value::Array(contracts));
+    }
+    #[tokio::test]
     async fn tool_definitions_builtins_only_hides_mcp_tools() {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
@@ -3793,6 +3924,22 @@ mod tests {
             assert!(
                 desc.contains("run_in_background"),
                 "`{name}` description must resolve params.task.run_in_background"
+            );
+            let timeout = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .map(|d| &d.function.parameters["properties"]["timeout_ms"])
+                .unwrap_or_else(|| panic!("`{name}` should expose timeout_ms"));
+            assert!(
+                timeout.get("maximum").is_some(),
+                "`{name}`.timeout_ms must carry the resolved wait ceiling: {timeout}"
+            );
+            assert!(
+                !timeout["description"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("{max_"),
+                "`{name}`.timeout_ms has an unresolved placeholder: {timeout}"
             );
         }
     }

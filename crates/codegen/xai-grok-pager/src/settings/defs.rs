@@ -7,9 +7,9 @@
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
 };
+use crate::appearance::permission_cursor::DefaultSelectedPermission;
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
-use crate::appearance::permission_cursor::DefaultSelectedPermission;
 
 use xai_grok_shell::agent::config::UiConfig;
 use xai_grok_tools::implementations::grok_build::ask_user_question;
@@ -110,7 +110,8 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "auto",
         display: "Auto",
-        description: "LLM classifier approves safe tools; dangerous actions may still prompt or deny.",
+        description:
+            "LLM classifier approves safe tools; dangerous actions may still prompt or deny.",
     },
     EnumChoice {
         canonical: "always-approve",
@@ -368,7 +369,8 @@ const VOICE_CAPTURE_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "hold",
         display: "Hold to talk",
-        description: "Hold Ctrl+Space / F8 to record, release to stop. Needs a Kitty-protocol terminal.",
+        description:
+            "Hold Ctrl+Space / F8 to record, release to stop. Needs a Kitty-protocol terminal.",
     },
 ];
 
@@ -388,7 +390,8 @@ const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "auto",
         display: "System",
-        description: "Use the system locale when it is a supported STT language; otherwise English.",
+        description:
+            "Use the system locale when it is a supported STT language; otherwise English.",
     },
     EnumChoice {
         canonical: "ar",
@@ -700,6 +703,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             keywords: &["queue", "combine", "batch", "follow-up", "merge", "pending"],
             kind: SettingKind::Bool {
                 default: ui_default.combine_queued_prompts.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "enter_steers",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shared,
+            label: "Enter steers mid-turn",
+            description: "When a turn is running, swap Enter and the send-now chord \
+                          (Ctrl+Enter, or Ctrl+O / Ctrl+L on some terminals). Off \
+                          (default): Enter queues a follow-up; the chord sends now \
+                          (cancels the turn). On: Enter sends now; the chord queues. \
+                          Matches Codex's historical steer toggle, adapted to Open \
+                          Grok's Enter ↔ Ctrl+Enter pair (Codex used Enter ↔ Tab).",
+            keywords: &[
+                "steer",
+                "enter",
+                "queue",
+                "send now",
+                "interject",
+                "ctrl+enter",
+                "follow-up",
+                "mid-turn",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.enter_steers_enabled(),
             },
             restart_required: false,
             hidden_in_minimal: false,

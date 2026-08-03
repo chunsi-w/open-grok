@@ -16,6 +16,21 @@ use super::*;
 pub(crate) fn run_on_session_sized_stack(
     test: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + 'static,
 ) {
+    run_on_session_sized_stack_inner(false, test);
+}
+
+/// Like [`run_on_session_sized_stack`], but with Tokio's paused clock so
+/// backoff `sleep`s auto-advance (same as `#[tokio::test(start_paused)]`).
+pub(crate) fn run_on_session_sized_stack_paused(
+    test: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + 'static,
+) {
+    run_on_session_sized_stack_inner(true, test);
+}
+
+fn run_on_session_sized_stack_inner(
+    start_paused: bool,
+    test: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + 'static,
+) {
     const TEST_SESSION_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
     let outcome = std::thread::Builder::new()
         .name("test-session".to_string())
@@ -23,6 +38,7 @@ pub(crate) fn run_on_session_sized_stack(
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
+                .start_paused(start_paused)
                 .build()
                 .expect("test session runtime");
             let local = tokio::task::LocalSet::new();
@@ -337,6 +353,7 @@ pub(crate) async fn create_test_actor_ex(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             embedding_provider: xai_grok_sampling_types::ModelProvider::Xai,
@@ -654,19 +671,5 @@ pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
     assert!(
         !reminder.contains("{DISCIPLINE_BLOCK}"),
         "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
-    );
-}
-#[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
-    });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
     );
 }
