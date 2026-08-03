@@ -1,0 +1,168 @@
+name: Build Linux ARM64 binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-linux-aarch64.yml
+      - scripts/build-linux-aarch64-release.sh
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - OPEN_GROK_VERSION
+      - crates/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-aarch64-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: "10"
+
+jobs:
+  build:
+    name: Native ARM64, glibc, 4 KiB pages
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify runner and build tools
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          test "$(getconf PAGESIZE)" = 4096
+          for command in clang cmake curl file gcc git gzip make pkg-config readelf sha256sum strip tar unzip; do
+            command -v "$command" >/dev/null || {
+              echo "Missing required runner tool: $command" >&2
+              exit 1
+            }
+          done
+          df -h .
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rust_version="$(sed -nE 's/^channel = "([^"]+)"/\1/p' rust-toolchain.toml)"
+          test -n "$rust_version"
+          rustup toolchain install "$rust_version" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$rust_version" >> "$GITHUB_ENV"
+          rustc "+$rust_version" --version --verbose
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: linux-aarch64-gnu-generic-4k-release-dist-v1
+          cache-bin: false
+          cache-on-failure: true
+          cache-targets: true
+          env-vars: CARGO_INCREMENTAL
+          workspaces: . -> target
+
+      - name: Download and verify pinned build inputs
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/open-grok-build-tools"
+          protoc_archive="$tools_dir/protoc-29.3-linux-aarch_64.zip"
+          protoc_root="$tools_dir/protoc-29.3"
+          rg_archive="$tools_dir/ripgrep-15.0.0-aarch64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$tools_dir" "$protoc_root"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-aarch_64.zip \
+            --output "$protoc_archive"
+          printf '%s  %s\n' \
+            6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32 \
+            "$protoc_archive" | sha256sum --check --strict
+          unzip -q "$protoc_archive" -d "$protoc_root"
+          test "$("$protoc_root/bin/protoc" --version)" = "libprotoc 29.3"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-aarch64-unknown-linux-gnu.tar.gz \
+            --output "$rg_archive"
+          printf '%s  %s\n' \
+            15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754 \
+            "$rg_archive" | sha256sum --check --strict
+          tar -xzf "$rg_archive" -C "$tools_dir"
+          rg_path="$tools_dir/ripgrep-15.0.0-aarch64-unknown-linux-gnu/rg"
+          test "$("$rg_path" --version | sed -n '1p')" = "ripgrep 15.0.0"
+          grep -Eq 'Machine:[[:space:]]+AArch64' <<<"$(readelf -h "$rg_path")"
+
+          {
+            echo "PROTOC=$protoc_root/bin/protoc"
+            echo "GROK_TOOLS_BUNDLE_RG_PATH=$rg_path"
+            echo "GROK_SHELL_BUNDLE_RG_PATH=$rg_path"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and verify release package
+        run: ./scripts/build-linux-aarch64-release.sh
+
+      - name: Verify packaged bytes independently
+        run: |
+          set -euo pipefail
+          archive=dist/open-grok-linux-aarch64.tar.gz
+          checksum=dist/open-grok-linux-aarch64.tar.gz.sha256
+          (
+            cd dist
+            sha256sum --check --strict "$(basename "$checksum")"
+          )
+
+          verify_root="$(mktemp -d)"
+          trap 'rm -rf "$verify_root"' EXIT
+          tar -xzf "$archive" -C "$verify_root"
+          package="$verify_root/open-grok-linux-aarch64"
+          test -x "$package/open-grok"
+          (
+            cd "$package"
+            sha256sum --check --strict open-grok.sha256
+          )
+          grep -Eq 'Machine:[[:space:]]+AArch64' <<<"$(readelf -h "$package/open-grok")"
+          OPENGROK_HOME="$verify_root/home" \
+            OPENGROK_DISABLE_AUTOUPDATER=1 \
+            "$package/open-grok" --version
+          cat "$package/build-info.txt"
+
+          {
+            echo '### Linux ARM64 artifact'
+            echo
+            echo '```text'
+            cat "$checksum"
+            sed -n '1,14p' "$package/build-info.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report final disk usage
+        if: always()
+        run: df -h .
+
+      - name: Upload compressed release package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-grok-linux-aarch64
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            dist/open-grok-linux-aarch64.tar.gz
+            dist/open-grok-linux-aarch64.tar.gz.sha256
