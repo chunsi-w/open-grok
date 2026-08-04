@@ -632,7 +632,11 @@ pub(super) fn render_rows(
                 };
                 let value_opt = values.get(row_pos).and_then(|v| v.as_ref());
                 let is_selected = row_idx == state.selected;
-                let is_expanded = expanded_snapshot.contains(key);
+                let is_hovered = hover_row_snapshot == Some(row_idx);
+                // Feature-flag rows surface context when selected (click /
+                // keyboard focus), not on hover. Other rows stay expand-on-demand.
+                let is_expanded =
+                    description_visible(key, expanded_snapshot.contains(key), is_selected);
 
                 // Group rows carry no scalar value; render a chevron row that
                 // opens the sub-sheet (skips the value/edited machinery below).
@@ -640,7 +644,6 @@ pub(super) fn render_rows(
                     meta.kind,
                     SettingKind::Group { .. } | SettingKind::DynamicMultiSelect { .. }
                 ) {
-                    let is_hovered = hover_row_snapshot == Some(row_idx);
                     let value_rect = render_setting_group_row(
                         buf,
                         label_rect,
@@ -715,7 +718,6 @@ pub(super) fn render_rows(
                 // Hit-rect spans both lines for two-line rows.
                 state.row_rects[row_idx] = render_area;
 
-                let is_hovered = hover_row_snapshot == Some(row_idx);
                 // `DynamicEnum` values persist canonicals. Render the resolved
                 // display label while retaining the canonical in modal state.
                 let rendered_value = match value {
@@ -838,12 +840,15 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 };
                 // Group rows carry no value; height = chevron row + the expanded
                 // description (cap 8), agreeing with the forward render loop.
+                let is_selected = row_idx == state.selected;
+                let is_expanded =
+                    description_visible(key, state.expanded_keys.contains(key), is_selected);
                 if matches!(
                     meta.kind,
                     SettingKind::Group { .. } | SettingKind::DynamicMultiSelect { .. }
                 ) {
                     let mut h: u16 = 1;
-                    if state.expanded_keys.contains(key) {
+                    if is_expanded {
                         h = h.saturating_add(wrapped_description_height(meta, None, area_width, 8));
                     }
                     heights.push(h);
@@ -853,7 +858,6 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                     heights.push(1);
                     continue;
                 };
-                let is_expanded = state.expanded_keys.contains(key);
                 let lock = state.row_lock(key);
                 let value_display = value_display(meta, &value, lock, &state.pager_snapshot);
                 let show_restart_pill = meta.restart_required && is_expanded;
@@ -2727,6 +2731,20 @@ pub(super) fn render_setting_row(
     }
 }
 
+/// Whether a setting row should paint its description.
+///
+/// Explicit Right/`▸` expansion always wins. Advanced local feature flags also
+/// surface their description while selected (click / keyboard focus) so opt-in
+/// flags explain themselves without discovering the expand chord. Hover alone
+/// does not expand — that would thrash layout as the pointer moves.
+fn description_visible(
+    key: crate::settings::SettingKey,
+    explicitly_expanded: bool,
+    is_selected: bool,
+) -> bool {
+    explicitly_expanded || (crate::settings::is_local_feature_flag(key) && is_selected)
+}
+
 /// Render the wrapped description for an expanded row.
 fn render_expanded_description(
     buf: &mut Buffer,
@@ -3083,5 +3101,24 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 id: 0,
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod description_visible_tests {
+    use super::description_visible;
+
+    #[test]
+    fn ordinary_settings_need_explicit_expand() {
+        assert!(!description_visible("compact_mode", false, true));
+        assert!(description_visible("compact_mode", true, false));
+    }
+
+    #[test]
+    fn local_feature_flags_show_on_select_not_hover() {
+        assert!(description_visible("features.web_fetch", false, true));
+        assert!(!description_visible("features.telemetry", false, false));
+        assert!(!description_visible("features.web_fetch", false, false));
+        assert!(description_visible("memory.enabled", true, false));
     }
 }

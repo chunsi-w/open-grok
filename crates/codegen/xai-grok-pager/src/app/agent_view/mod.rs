@@ -1975,15 +1975,10 @@ fn is_hash_key(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('#')
         || (key.code == KeyCode::Char('3') && key.modifiers.contains(KeyModifiers::SHIFT))
 }
-/// Check `[features] remember_mode` in config.toml. Defaults to `false`.
+/// Check `[features] remember_mode` via the Advanced local-feature-flag
+/// loader (effective config). Defaults to `false`.
 fn remember_mode_enabled() -> bool {
-    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
-    let Some(doc) = crate::config_toml_edit::read_config_document_for_edit(&path) else {
-        return false;
-    };
-    doc.get("features")
-        .and_then(|f| f.get("remember_mode"))
-        .and_then(|v| v.as_bool())
+    xai_grok_shell::util::config::load_local_feature_flag_sync("features.remember_mode")
         .unwrap_or(false)
 }
 /// Mouse reporting toggle chord (Ctrl+R on scrollback), for unified-log diagnostics.

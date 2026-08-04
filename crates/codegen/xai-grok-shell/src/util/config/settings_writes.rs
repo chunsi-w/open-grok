@@ -23,11 +23,19 @@ pub const LOCAL_FEATURE_FLAG_SPECS: &[LocalFeatureFlagSpec] = &[
         default: true,
     },
     LocalFeatureFlagSpec {
+        key: "features.telemetry",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
         key: "features.lsp_tools",
         default: false,
     },
     LocalFeatureFlagSpec {
         key: "features.web_fetch",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "toolset.web_fetch.allow_local",
         default: false,
     },
     LocalFeatureFlagSpec {
@@ -39,11 +47,40 @@ pub const LOCAL_FEATURE_FLAG_SPECS: &[LocalFeatureFlagSpec] = &[
         default: false,
     },
     LocalFeatureFlagSpec {
-        key: "doom_loop_recovery.enabled",
+        key: "features.remember_mode",
         default: false,
     },
     LocalFeatureFlagSpec {
+        // Matches `Config::resolve_doom_loop_recovery` default ON.
+        key: "doom_loop_recovery.enabled",
+        default: true,
+    },
+    LocalFeatureFlagSpec {
         key: "features.subagent_worktree_snapshot",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "diagnostics.crash_handler",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "ui.mouse_reporting_toggle",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "suggestions.enabled",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "suggestions.ai_enabled",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "sandbox.auto_allow_bash",
+        default: false,
+    },
+    LocalFeatureFlagSpec {
+        key: "tools.respect_gitignore",
         default: false,
     },
 ];
@@ -56,9 +93,25 @@ pub fn local_feature_flag_default(key: &str) -> Option<bool> {
 }
 
 fn read_nested_bool(root: &TomlValue, key: &str) -> Option<bool> {
-    key.split('.')
-        .try_fold(root, |value, part| value.get(part))
-        .and_then(TomlValue::as_bool)
+    let value = key
+        .split('.')
+        .try_fold(root, |value, part| value.get(part))?;
+    if let Some(b) = value.as_bool() {
+        return Some(b);
+    }
+    // `[features] telemetry` also accepts TelemetryMode string forms
+    // (`true`/`false`/`session_metrics`). Treat any non-disabled mode as on
+    // so the Advanced bool toggle reflects the effective gate.
+    if key == "features.telemetry" {
+        return value
+            .as_str()
+            .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "enabled" | "on" | "session_metrics" => Some(true),
+                "false" | "0" | "disabled" | "off" => Some(false),
+                _ => None,
+            });
+    }
+    None
 }
 
 pub fn load_local_feature_flag_sync(key: &str) -> Option<bool> {
@@ -598,11 +651,19 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            local_feature_flag_default("features.telemetry"),
+            Some(false)
+        );
+        assert_eq!(
             local_feature_flag_default("features.lsp_tools"),
             Some(false)
         );
         assert_eq!(
             local_feature_flag_default("features.web_fetch"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("toolset.web_fetch.allow_local"),
             Some(false)
         );
         assert_eq!(
@@ -614,11 +675,39 @@ mod tests {
             Some(false)
         );
         assert_eq!(
-            local_feature_flag_default("doom_loop_recovery.enabled"),
+            local_feature_flag_default("features.remember_mode"),
             Some(false)
         );
         assert_eq!(
+            local_feature_flag_default("doom_loop_recovery.enabled"),
+            Some(true)
+        );
+        assert_eq!(
             local_feature_flag_default("features.subagent_worktree_snapshot"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("diagnostics.crash_handler"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("ui.mouse_reporting_toggle"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("suggestions.enabled"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("suggestions.ai_enabled"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("sandbox.auto_allow_bash"),
+            Some(false)
+        );
+        assert_eq!(
+            local_feature_flag_default("tools.respect_gitignore"),
             Some(false)
         );
         assert_eq!(local_feature_flag_default("features.unknown"), None);
