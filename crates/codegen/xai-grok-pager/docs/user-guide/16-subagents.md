@@ -159,6 +159,29 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 ---
 
+## Agent Mailboxes
+
+The root agent and its live subagents form one collaboration team. Every member
+can discover the team and exchange explicitly addressed messages without
+exposing another agent's transcript.
+
+| Tool | Behavior |
+| --- | --- |
+| `list_agents` | Lists the root and subagents with stable IDs, lifecycle status, task labels, resume provenance, and worktree paths. |
+| `send_message` | Queues a message without starting a new turn. The recipient reads queued mail with `wait_agent`. |
+| `followup_task` | Delivers a follow-up at a safe model boundary and wakes an idle root session. |
+| `wait_agent` | Reads only the calling agent's inbox. Omit `timeout_ms` to wait up to 30 seconds, or pass `0` to poll. |
+
+Mailboxes are scoped to the root session: an agent cannot list or address agents
+owned by another session. Messages are shown in the root conversation and
+persisted in its session history for auditability. They are always treated as
+untrusted model-authored input, never as user consent or permission approval.
+
+Completed children are no longer live mailbox recipients. Continue one with
+`spawn_subagent(resume_from="<agent-id>")`; the resumed run receives a new ID.
+
+---
+
 ## Agent Swarms
 
 Swarm mode asks the main agent to split suitable independent work into one coordinated `agent_swarm` call. All members run in the foreground and their results return together in the original input order.

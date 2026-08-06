@@ -251,6 +251,11 @@ Generate an image from a text description.
 /imagine a golden sunset over a calm ocean with silhouetted palm trees
 ```
 
+Choose **Settings → Models → Image generation** to use either **Grok
+Imagine** or **OpenAI Images** for `/imagine` and image editing. The OpenAI
+option requires `open-grok login --codex`, a supported paid ChatGPT plan, and
+an Open Grok restart after changing the setting.
+
 ### `/imagine-video <description>`
 
 Generate a video from a text (or image) description. It plans shots, generates source images, and animates them with `image_to_video`.

@@ -116,6 +116,8 @@ Subagents **inherit** the parent `PermissionHandle` (including always-approve). 
 - Spawn via `task` / spawn_subagent tool → `SubagentCoordinator`.
 - Optional worktree isolation (`xai-fast-worktree` + workspace worktree).
 - Children are full sessions; usage folds back into parent.
+- Flat-team mailbox tools (`list_agents`, `send_message`, `followup_task`,
+  `wait_agent`) let live children coordinate without exposing peer transcripts.
 - Deep map: [`docs/agents/subagents.md`](docs/agents/subagents.md).
 
 ### 4.5 Code Mode

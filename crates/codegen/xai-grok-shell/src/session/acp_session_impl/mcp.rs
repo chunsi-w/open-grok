@@ -304,15 +304,7 @@ impl SessionActor {
         >,
     ) {
         let qualified_name = reg.name.clone();
-        let prefix = format!(
-            "{}{}",
-            server_name,
-            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-        );
-        let unqualified = qualified_name
-            .strip_prefix(&prefix)
-            .unwrap_or(&qualified_name)
-            .to_string();
+        let unqualified = reg.tool_name.clone();
         if let Some(meta) = reg.meta.as_ref() {
             mcp_state
                 .mcp_tool_meta
@@ -862,11 +854,7 @@ impl SessionActor {
     /// Unregister `server`'s tools from the bridge after stdio restart
     /// exhaustion, so the model stops calling a now-absent client.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
-        let prefix = format!(
-            "{}{}",
-            server,
-            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-        );
+        let prefix = crate::session::mcp_servers::mcp_tool_name_prefix(server);
         let removed = self
             .agent
             .borrow()
@@ -1498,28 +1486,11 @@ impl SessionActor {
                                 "MCP handshake succeeded",
                             );
                             let tool_count = registrations.len() as u32;
-                            let registered_tool_names: Vec<String> = registrations
-                                .iter()
-                                .map(|r| {
-                                    let prefix = format!(
-                                        "{}{}",
-                                        server_name,
-                                        crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                                    );
-                                    r.name.strip_prefix(&prefix).unwrap_or(&r.name).to_string()
-                                })
-                                .collect();
+                            let registered_tool_names: Vec<String> =
+                                registrations.iter().map(|r| r.tool_name.clone()).collect();
                             for reg in registrations {
                                 let qualified_name = reg.name.clone();
-                                let prefix = format!(
-                                    "{}{}",
-                                    server_name,
-                                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                                );
-                                let unqualified = qualified_name
-                                    .strip_prefix(&prefix)
-                                    .unwrap_or(&qualified_name)
-                                    .to_string();
+                                let unqualified = reg.tool_name.clone();
                                 if let Some(meta) = reg.meta.as_ref() {
                                     mcp_state
                                         .mcp_tool_meta
@@ -1752,15 +1723,7 @@ impl SessionActor {
                 let mut mcp_state = mcp_state_bg.lock().await;
                 for reg in regs {
                     let qualified_name = reg.name.clone();
-                    let prefix = format!(
-                        "{}{}",
-                        server_name,
-                        crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                    );
-                    let unqualified = qualified_name
-                        .strip_prefix(&prefix)
-                        .unwrap_or(&qualified_name)
-                        .to_string();
+                    let unqualified = reg.tool_name.clone();
                     if let Some(meta) = reg.meta.as_ref() {
                         mcp_state
                             .mcp_tool_meta

@@ -208,10 +208,16 @@ async fn first_call_succeeds_no_refresh() {
     let am = failing_am();
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(Some(&am), None, "test_tool", || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        async { ok_result("ok") }
-    })
+    let r = call_with_auth_retry(
+        Some(&am),
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "test_tool",
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { ok_result("ok") }
+        },
+    )
     .await;
 
     assert!(matches!(r.unwrap().output, ToolOutput::Text(t) if t.text == "ok"));
@@ -223,10 +229,16 @@ async fn non_auth_error_is_returned_without_refresh() {
     let am = succeeding_am();
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(Some(&am), None, "test_tool", || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        async { err("request timed out") }
-    })
+    let r = call_with_auth_retry(
+        Some(&am),
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "test_tool",
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { err("request timed out") }
+        },
+    )
     .await;
 
     assert!(r.is_err());
@@ -238,16 +250,22 @@ async fn auth_error_with_successful_refresh_retries() {
     let am = succeeding_am();
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(Some(&am), None, "image_gen", || {
-        let n = calls.fetch_add(1, Ordering::SeqCst);
-        async move {
-            if n == 0 {
-                http_err(401, "Image generation failed with HTTP 401 Unauthorized: x")
-            } else {
-                ok_result("retried-ok")
+    let r = call_with_auth_retry(
+        Some(&am),
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "image_gen",
+        || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    http_err(401, "Image generation failed with HTTP 401 Unauthorized: x")
+                } else {
+                    ok_result("retried-ok")
+                }
             }
-        }
-    })
+        },
+    )
     .await;
 
     assert!(matches!(r.unwrap().output, ToolOutput::Text(t) if t.text == "retried-ok"));
@@ -259,10 +277,16 @@ async fn auth_error_with_failed_refresh_returns_original_error() {
     let am = failing_am();
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(Some(&am), None, "test_tool", || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        async { err("HTTP 401 Unauthorized") }
-    })
+    let r = call_with_auth_retry(
+        Some(&am),
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "test_tool",
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { err("HTTP 401 Unauthorized") }
+        },
+    )
     .await;
 
     assert!(r.unwrap_err().to_string().contains("401"));
@@ -277,10 +301,16 @@ async fn auth_error_with_failed_refresh_returns_original_error() {
 async fn auth_error_without_refresher_returns_original_error() {
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(None, None, "test_tool", || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        async { err("HTTP 401 Unauthorized") }
-    })
+    let r = call_with_auth_retry(
+        None,
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "test_tool",
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { err("HTTP 401 Unauthorized") }
+        },
+    )
     .await;
 
     assert!(r.is_err());
@@ -295,10 +325,16 @@ async fn retry_is_bounded_at_one_even_if_retry_also_fails_with_auth() {
     let am = succeeding_am();
     let calls = AtomicUsize::new(0);
 
-    let r = call_with_auth_retry(Some(&am), None, "test_tool", || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        async { http_err(401, "Image generation failed with HTTP 401 Unauthorized: x") }
-    })
+    let r = call_with_auth_retry(
+        Some(&am),
+        ToolAuthRefreshRoute::XaiSession,
+        None,
+        "test_tool",
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { http_err(401, "Image generation failed with HTTP 401 Unauthorized: x") }
+        },
+    )
     .await;
 
     assert!(r.is_err());

@@ -419,9 +419,11 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                         let headers = build_proxy_headers(url);
                         (
                             ImageGenConfig::Enabled {
+                                provider: xai_grok_tools::types::ImageGenerationProvider::Grok,
                                 api_key: token.clone(),
                                 base_url: url.clone(),
                                 extra_headers: headers.clone(),
+                                api_key_provider: None,
                                 image_gen_enabled: true,
                                 image_edit_enabled: true,
                                 model_override: None,

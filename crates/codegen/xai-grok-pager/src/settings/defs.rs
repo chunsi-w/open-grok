@@ -137,6 +137,19 @@ const CODE_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const IMAGE_GENERATION_PROVIDER_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "grok",
+        display: "Grok Imagine",
+        description: "Use xAI Imagine with isolated xAI credentials.",
+    },
+    EnumChoice {
+        canonical: "openai",
+        display: "OpenAI Images",
+        description: "Use gpt-image-2 through the Codex Images API and isolated ChatGPT Codex credentials.",
+    },
+];
+
 // ---------------------------------------------------------------------------
 // Coding-data-sharing catalog.
 //
@@ -1015,6 +1028,36 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
+        // SHELL-owned `[ui].image_generation_provider`. Tool clients and auth
+        // routes are fixed when the process builds its session harnesses.
+        SettingMeta {
+            key: "image_generation_provider",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Image generation",
+            description: "Choose Grok Imagine or OpenAI Images for image generation and editing. OpenAI Images requires `open-grok login --codex` and a supported paid ChatGPT plan. Restart Open Grok to apply.",
+            keywords: &[
+                "image",
+                "generation",
+                "edit",
+                "imagine",
+                "grok",
+                "xai",
+                "openai",
+                "codex",
+                "gpt-image-2",
+            ],
+            kind: SettingKind::Enum {
+                default: ui_default
+                    .image_generation_provider
+                    .unwrap_or_default()
+                    .as_canonical(),
+                choices: IMAGE_GENERATION_PROVIDER_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
         // PAGER-owned; default pinned by `defaults_match_pager_state`.
         SettingMeta {
             key: "multiline_mode",
@@ -1133,6 +1176,25 @@ pub fn default_settings() -> Vec<SettingMeta> {
             label: "DeepSeek API key",
             description: "API key from the DeepSeek platform. Saving refreshes the curated direct DeepSeek model catalog.",
             keywords: &["deepseek", "api", "key", "credential", "direct", "models"],
+            kind: SettingKind::Secret,
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "meta_api_key",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Meta API key",
+            description: "API key for Meta's Model API. Saving refreshes the curated Muse Spark model catalog.",
+            keywords: &[
+                "meta",
+                "muse",
+                "spark",
+                "api",
+                "key",
+                "credential",
+                "models",
+            ],
             kind: SettingKind::Secret,
             restart_required: false,
             hidden_in_minimal: false,

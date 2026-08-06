@@ -296,7 +296,9 @@ pub(crate) fn resolve_model_catalog(
     cfg: &config::Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
-    resolve_model_catalog_with_provider_catalogs(cfg, prefetched, None, None, None, None, None)
+    resolve_model_catalog_with_provider_catalogs(
+        cfg, prefetched, None, None, None, None, None, None,
+    )
 }
 
 /// Resolve the combined catalog while preserving each provider's independently
@@ -308,6 +310,7 @@ pub(crate) fn resolve_model_catalog_with_provider_catalogs(
     kimi_catalog: Option<&KimiModelsCatalog>,
     fireworks_catalog: Option<&FireworksModelsCatalog>,
     deepseek_catalog: Option<&DeepSeekModelsCatalog>,
+    meta_catalog: Option<&MetaModelsCatalog>,
     opencode_go_catalog: Option<&OpenCodeGoModelsCatalog>,
 ) -> IndexMap<String, ModelEntry> {
     resolve_model_catalog_with_provider_catalogs_and_wafer(
@@ -317,6 +320,7 @@ pub(crate) fn resolve_model_catalog_with_provider_catalogs(
         kimi_catalog,
         fireworks_catalog,
         deepseek_catalog,
+        meta_catalog,
         opencode_go_catalog,
         None,
     )
@@ -329,6 +333,7 @@ pub(crate) fn resolve_model_catalog_with_provider_catalogs_and_wafer(
     kimi_catalog: Option<&KimiModelsCatalog>,
     fireworks_catalog: Option<&FireworksModelsCatalog>,
     deepseek_catalog: Option<&DeepSeekModelsCatalog>,
+    meta_catalog: Option<&MetaModelsCatalog>,
     opencode_go_catalog: Option<&OpenCodeGoModelsCatalog>,
     wafer_catalog: Option<&crate::wafer_models::WaferModelsCatalog>,
 ) -> IndexMap<String, ModelEntry> {
@@ -342,6 +347,8 @@ pub(crate) fn resolve_model_catalog_with_provider_catalogs_and_wafer(
     let deepseek_entries = deepseek_catalog.map(DeepSeekModelsCatalog::entries);
     let deepseek_authoritative =
         deepseek_catalog.is_some_and(DeepSeekModelsCatalog::is_authoritative);
+    let meta_entries = meta_catalog.map(MetaModelsCatalog::entries);
+    let meta_authoritative = meta_catalog.is_some_and(MetaModelsCatalog::is_authoritative);
     let opencode_go_entries = opencode_go_catalog.map(OpenCodeGoModelsCatalog::entries);
     let opencode_go_authoritative =
         opencode_go_catalog.is_some_and(OpenCodeGoModelsCatalog::is_authoritative);
@@ -357,6 +364,8 @@ pub(crate) fn resolve_model_catalog_with_provider_catalogs_and_wafer(
             fireworks_authoritative,
             deepseek_entries,
             deepseek_authoritative,
+            meta_entries,
+            meta_authoritative,
             opencode_go_entries,
             opencode_go_authoritative,
         );

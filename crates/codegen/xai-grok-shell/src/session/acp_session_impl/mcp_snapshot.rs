@@ -45,9 +45,7 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     // servers become discoverable; `None` for other agent types (no-op).
     mcps_root: Option<std::path::PathBuf>,
 ) {
-    use crate::session::tool_index::{
-        ServerMetadata, ToolMetadata, extract_parameter_names, split_qualified_name,
-    };
+    use crate::session::tool_index::{ServerMetadata, ToolMetadata, extract_parameter_names};
 
     let all_defs = tool_bridge.tool_definitions().await;
     let mut seen_tools = std::collections::HashSet::new();
@@ -56,11 +54,12 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
         .filter(|d| d.function.name.contains("__"))
         .filter(|d| seen_tools.insert(d.function.name.clone()))
         .map(|d| {
-            let (server, tool) = split_qualified_name(&d.function.name);
+            let (server, tool) = crate::session::mcp_servers::parse_mcp_tool_name(&d.function.name)
+                .unwrap_or_else(|| (String::new(), d.function.name.clone()));
             ToolMetadata {
                 qualified_name: d.function.name.clone(),
-                server_name: server.to_string(),
-                tool_name: tool.to_string(),
+                server_name: server,
+                tool_name: tool,
                 description: d.function.description.clone().unwrap_or_default(),
                 parameters: extract_parameter_names(&d.function.parameters),
                 input_schema: d.function.parameters.clone(),

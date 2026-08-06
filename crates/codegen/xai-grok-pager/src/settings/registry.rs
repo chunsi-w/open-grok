@@ -363,6 +363,8 @@ pub struct PagerLocalSnapshot {
     pub fireworks_api_key_status: SecretStatus,
     /// Status-only mirror for the direct DeepSeek API-key source.
     pub deepseek_api_key_status: SecretStatus,
+    /// Status-only mirror for the Meta Model API-key source.
+    pub meta_api_key_status: SecretStatus,
     pub opencode_go_api_key_status: SecretStatus,
     /// Status-only mirror for the Wafer AI API-key source.
     pub wafer_api_key_status: SecretStatus,
@@ -443,6 +445,7 @@ impl Default for PagerLocalSnapshot {
             kimi_code_api_key_status: SecretStatus::Missing,
             fireworks_api_key_status: SecretStatus::Missing,
             deepseek_api_key_status: SecretStatus::Missing,
+            meta_api_key_status: SecretStatus::Missing,
             opencode_go_api_key_status: SecretStatus::Missing,
             wafer_api_key_status: SecretStatus::Missing,
             opencode_go_models: Vec::new(),
@@ -846,6 +849,11 @@ pub fn current_value_for(
         "code_mode" => Some(SettingValue::Enum(
             ui.code_mode.unwrap_or_default().as_canonical(),
         )),
+        "image_generation_provider" => Some(SettingValue::Enum(
+            ui.image_generation_provider
+                .unwrap_or_default()
+                .as_canonical(),
+        )),
         // ask_user_question timeout: reflects the effective TOML merge; the
         // toggle writes the user layer, and env/remote settings tiers feed the
         // final gate at agent build. None → the resolver-shared default (ON).
@@ -886,6 +894,7 @@ pub fn current_value_for(
         "kimi_code_api_key" => Some(SettingValue::SecretStatus(pager.kimi_code_api_key_status)),
         "fireworks_api_key" => Some(SettingValue::SecretStatus(pager.fireworks_api_key_status)),
         "deepseek_api_key" => Some(SettingValue::SecretStatus(pager.deepseek_api_key_status)),
+        "meta_api_key" => Some(SettingValue::SecretStatus(pager.meta_api_key_status)),
         "opencode_go_api_key" => Some(SettingValue::SecretStatus(pager.opencode_go_api_key_status)),
         "wafer_api_key" => Some(SettingValue::SecretStatus(pager.wafer_api_key_status)),
         "toolset.perplexity_web_search.enabled" => {
@@ -1227,6 +1236,7 @@ mod tests {
                     | "kimi_code_api_key"
                     | "fireworks_api_key"
                     | "deepseek_api_key"
+                    | "meta_api_key"
                     | "opencode_go_api_key"
                     | "wafer_api_key"
                     | "perplexity_api_key",
@@ -1313,6 +1323,28 @@ mod tests {
                             .map(|choice| choice.canonical)
                             .collect::<Vec<_>>(),
                         vec!["direct", "code_mode", "code_mode_only"],
+                    );
+                }
+                (
+                    "image_generation_provider",
+                    SettingKind::Enum {
+                        default, choices, ..
+                    },
+                ) => {
+                    assert_eq!(
+                        *default,
+                        ui.image_generation_provider
+                            .unwrap_or_default()
+                            .as_canonical(),
+                        "image_generation_provider default drifts from UiConfig::default()",
+                    );
+                    assert_eq!(*default, "grok");
+                    assert_eq!(
+                        choices
+                            .iter()
+                            .map(|choice| choice.canonical)
+                            .collect::<Vec<_>>(),
+                        vec!["grok", "openai"],
                     );
                 }
                 // ask_user_question timeout: no UiConfig mirror (lives under

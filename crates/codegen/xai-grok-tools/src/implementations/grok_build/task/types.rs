@@ -181,6 +181,101 @@ pub struct SubagentRequest {
     pub cancel_token: CancellationToken,
 }
 
+/// Team identity injected into every model-facing session.
+///
+/// `agent_id` is the current session ID. `team_scope_id` is the root session
+/// that owns the flat subagent cohort. Keeping these separate lets children
+/// address siblings without weakening the existing parent-session scoping used
+/// by task polling and cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMailboxIdentity {
+    pub team_scope_id: String,
+    pub agent_id: String,
+}
+
+register_resource!("grok_build", "AgentMailboxIdentity", AgentMailboxIdentity);
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMailboxMessageKind {
+    Message,
+    FollowupTask,
+}
+
+impl AgentMailboxMessageKind {
+    pub fn wakes_recipient(self) -> bool {
+        matches!(self, Self::FollowupTask)
+    }
+}
+
+/// One immutable peer message. Runtime-owned fields are never accepted from
+/// the model; the send tools stamp them before dispatch.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AgentMailboxMessage {
+    pub message_id: String,
+    pub team_scope_id: String,
+    pub from_agent_id: String,
+    pub to_agent_id: String,
+    pub kind: AgentMailboxMessageKind,
+    pub body: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AgentRosterEntry {
+    pub agent_id: String,
+    pub is_root: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ListAgentsOutput {
+    pub team_scope_id: String,
+    pub agents: Vec<AgentRosterEntry>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageDeliveryStatus {
+    Queued,
+    Delivered,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AgentMessageSendOutput {
+    pub message_id: String,
+    pub target_agent_id: String,
+    pub status: AgentMessageDeliveryStatus,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct WaitAgentMessagesOutput {
+    pub messages: Vec<AgentMailboxMessage>,
+    pub timed_out: bool,
+}
+
 /// Spawn command envelope owned by the coordinator mailbox.
 #[derive(Educe)]
 #[educe(Debug)]
@@ -400,6 +495,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
+                ToolKind::AgentCollaboration,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -425,6 +521,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
+                ToolKind::AgentCollaboration,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -443,6 +540,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
+                ToolKind::AgentCollaboration,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -469,6 +567,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
+                ToolKind::AgentCollaboration,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -563,6 +662,33 @@ pub struct SubagentQueryRequest {
     /// Oneshot for the coordinator to send back the snapshot.
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct AgentListRequest {
+    pub identity: AgentMailboxIdentity,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<ListAgentsOutput>,
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct AgentMessageRequest {
+    pub identity: AgentMailboxIdentity,
+    pub target: String,
+    pub message: AgentMailboxMessage,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Result<AgentMessageSendOutput, String>>,
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct AgentMailboxWaitRequest {
+    pub identity: AgentMailboxIdentity,
+    pub timeout_ms: u64,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<WaitAgentMessagesOutput>,
 }
 
 #[derive(Educe)]
@@ -961,6 +1087,9 @@ pub struct SubagentDescribeRequest {
 pub enum SubagentEvent {
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
+    ListAgents(AgentListRequest),
+    SendAgentMessage(AgentMessageRequest),
+    WaitAgentMessages(AgentMailboxWaitRequest),
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
@@ -1077,19 +1206,43 @@ pub trait ForegroundWaitGuard: Send {}
 
 impl<T: Send> ForegroundWaitGuard for T {}
 
-type ForegroundWaitFactory = dyn Fn() -> Box<dyn ForegroundWaitGuard> + Send + Sync;
+/// What the running turn is parked on, so the host can decide whether an
+/// arriving user prompt may abort the turn.
+///
+/// A single foreground child (`task`) is cheap to restart, so the host aborts
+/// the turn and runs the new prompt immediately. A swarm is a live cohort whose
+/// members all die with the turn, so aborting would throw away in-flight work
+/// the user did not ask to discard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ForegroundWaitKind {
+    /// One foreground child; a user prompt may abort the turn.
+    #[default]
+    Interruptible,
+    /// A multi-member cohort; a user prompt must reach the orchestrator without
+    /// aborting the turn.
+    Orchestration,
+}
+
+type ForegroundWaitFactory =
+    dyn Fn(ForegroundWaitKind) -> Box<dyn ForegroundWaitGuard> + Send + Sync;
 
 /// Factory injected by hosts that expose a send-now wait window.
 #[derive(Clone)]
 pub struct SubagentForegroundWait(Arc<ForegroundWaitFactory>);
 
 impl SubagentForegroundWait {
-    pub fn new(factory: impl Fn() -> Box<dyn ForegroundWaitGuard> + Send + Sync + 'static) -> Self {
+    pub fn new(
+        factory: impl Fn(ForegroundWaitKind) -> Box<dyn ForegroundWaitGuard> + Send + Sync + 'static,
+    ) -> Self {
         Self(Arc::new(factory))
     }
 
     pub fn enter(&self) -> Box<dyn ForegroundWaitGuard> {
-        (self.0)()
+        self.enter_kind(ForegroundWaitKind::Interruptible)
+    }
+
+    pub fn enter_kind(&self, kind: ForegroundWaitKind) -> Box<dyn ForegroundWaitGuard> {
+        (self.0)(kind)
     }
 }
 
@@ -1258,6 +1411,7 @@ mod tests {
                 tc("GrokBuild:task", ToolKind::Task),
                 tc("GrokBuild:agent_swarm", ToolKind::AgentSwarm),
                 tc("GrokBuild:workflow", ToolKind::Workflow),
+                tc("GrokBuild:send_message", ToolKind::AgentCollaboration),
                 tc("GrokBuild:get_task_output", ToolKind::BackgroundTaskAction),
                 tc("GrokBuild:kill_task", ToolKind::KillTaskAction),
                 ToolConfig::from_id("Mcp:custom_tool"),
@@ -1270,8 +1424,76 @@ mod tests {
         let ids: Vec<&str> = config.tools.iter().map(|tc| tc.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["GrokBuild:read_file", "Mcp:custom_tool"],
-            "spawn tools must go, and orphaned background-task lifecycle tools with them"
+            vec![
+                "GrokBuild:read_file",
+                "GrokBuild:send_message",
+                "Mcp:custom_tool"
+            ],
+            "spawn tools must go, mailbox collaboration must remain, and orphaned background-task lifecycle tools go"
+        );
+    }
+
+    /// `task`, `agent_swarm`, and `workflow` are three separate model surfaces
+    /// built on the same subagent machinery. They must stay separately
+    /// addressable, and a single subagent must stand alone: `task`'s
+    /// requirements hold with neither orchestrator in the toolset.
+    #[test]
+    fn task_agent_swarm_and_workflow_stay_three_distinct_surfaces() {
+        use crate::implementations::grok_build::{AgentSwarmTool, TaskTool, WorkflowTool};
+        use crate::types::requirements::{EvalContext, ProposedTool};
+        use crate::types::tool_metadata::ToolMetadata;
+        use xai_tool_runtime::Tool;
+
+        assert_eq!(
+            [
+                Tool::id(&TaskTool).as_str().to_string(),
+                Tool::id(&AgentSwarmTool).as_str().to_string(),
+                Tool::id(&WorkflowTool).as_str().to_string(),
+            ],
+            ["task", "agent_swarm", "workflow"],
+            "each orchestration surface keeps its own stable tool id"
+        );
+        assert_eq!(
+            [
+                ToolMetadata::kind(&TaskTool),
+                ToolMetadata::kind(&AgentSwarmTool),
+                ToolMetadata::kind(&WorkflowTool),
+            ],
+            [ToolKind::Task, ToolKind::AgentSwarm, ToolKind::Workflow],
+            "each surface keeps its own ToolKind so packs and Code Mode can gate them apart"
+        );
+
+        // A lone subagent surface: `task` plus the background lifecycle tools it
+        // needs to manage what it spawns. No swarm, no workflow.
+        let params = serde_json::Value::Object(Default::default());
+        let lone_subagent = ["task", "get_task_output", "kill_task"];
+        let kinds = [
+            ToolKind::Task,
+            ToolKind::BackgroundTaskAction,
+            ToolKind::KillTaskAction,
+        ];
+        let proposed: Vec<ProposedTool> = lone_subagent
+            .iter()
+            .zip(kinds)
+            .map(|(id, kind)| ProposedTool {
+                namespace: "GrokBuild",
+                id,
+                kind,
+                params: &params,
+                input_schema: None,
+            })
+            .collect();
+        let ctx = EvalContext {
+            tools: &proposed,
+            self_params: &params,
+        };
+        assert!(
+            ToolMetadata::requires_expr(&TaskTool).eval(&|req| req.eval(&ctx)),
+            "an individual subagent must be usable without agent_swarm or workflow"
+        );
+        assert!(
+            ToolMetadata::requires_expr(&AgentSwarmTool).eval(&|req| req.eval(&ctx)),
+            "agent_swarm layers on the task surface rather than replacing it"
         );
     }
 

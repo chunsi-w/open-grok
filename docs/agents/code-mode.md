@@ -209,7 +209,7 @@ From `is_code_mode_direct_only_tool` — must stay model-visible; **excluded** f
 | --- | --- |
 | Human interaction | `ask_user_question`, `request_user_input` |
 | Plan / workflow | `enter_plan_mode`, `exit_plan_mode`, `workflow` |
-| Multi-agent / tasks | `task`, `spawn_subagent`, `agent_swarm`, `get_task_output`, `get_command_or_subagent_output`, `wait_tasks`, `wait_commands_or_subagents`, `kill_task`, `kill_command_or_subagent` |
+| Multi-agent / tasks | `task`, `spawn_subagent`, `agent_swarm`, `get_task_output`, `get_command_or_subagent_output`, `wait_tasks`, `wait_commands_or_subagents`, `kill_task`, `kill_command_or_subagent`, `list_agents`, `send_message`, `followup_task`, `wait_agent` |
 
 Rationale: ACP questions and collaboration lifecycle cannot safely live inside a JS callback that pauses the model turn. Matches Sol multi-agent-v2 **DirectModelOnly** policy.
 

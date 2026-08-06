@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use xai_grok_config_types::DisplayRefreshSettings;
 
+pub use xai_grok_tools::types::ImageGenerationProvider;
+
 /// User-selected tool presentation for Responses-backed sessions.
 ///
 /// The custom deserializer preserves compatibility with the original boolean
@@ -189,6 +191,11 @@ pub struct UiConfig {
     /// `true` = mixed Code Mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_mode: Option<ToolModePreference>,
+    /// Image generation service for new sessions. Grok uses xAI Imagine with
+    /// xAI credentials. OpenAI uses the Codex Images API with isolated Codex
+    /// OAuth credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<ImageGenerationProvider>,
     /// In-app drag selection highlight: `flash` | `hold` (legacy bool accepted).
     #[serde(
         default,
@@ -354,6 +361,7 @@ impl Default for UiConfig {
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,
             code_mode: None,
+            image_generation_provider: None,
             cancel_subagents_on_turn_cancel: None,
             keep_text_selection: None,
             selection_highlight_duration_ms: None,
@@ -464,6 +472,25 @@ mod tests {
         let error = serde_json::from_str::<UiConfig>(r#"{"code_mode":"automatic"}"#)
             .expect_err("unknown code mode must not silently become direct");
         assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn image_generation_provider_defaults_to_grok_and_round_trips() {
+        assert_eq!(UiConfig::default().image_generation_provider, None);
+
+        let openai: UiConfig =
+            serde_json::from_str(r#"{"image_generation_provider":"openai"}"#).unwrap();
+        assert_eq!(
+            openai.image_generation_provider,
+            Some(ImageGenerationProvider::OpenAi)
+        );
+        assert_eq!(
+            serde_json::to_value(openai)
+                .unwrap()
+                .get("image_generation_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("openai")
+        );
     }
 
     #[test]

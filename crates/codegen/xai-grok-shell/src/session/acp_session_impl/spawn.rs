@@ -1264,6 +1264,10 @@ pub(crate) async fn spawn_session_actor(
         subagents_max_depth,
         multi_agent_policy_enabled: startup_hints.multi_agent_policy_enabled.unwrap_or(true),
         session_id_str: session_info.id.0.to_string(),
+        team_scope_id: startup_hints
+            .parent_session_id
+            .clone()
+            .unwrap_or_else(|| session_info.id.0.to_string()),
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
         path_not_found_hints,

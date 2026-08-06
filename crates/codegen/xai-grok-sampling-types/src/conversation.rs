@@ -123,6 +123,9 @@ pub enum SyntheticReason {
     /// Scheduled task (`/loop`) prompt fired by the scheduler.  Wakes the
     /// agent.
     SchedulerFired,
+    /// Mailbox message routed from another agent in the same collaboration
+    /// team.  Wakes the agent.  Model-authored input, never user consent.
+    AgentMessage,
     /// Feedback from a `Stop`/`SubagentStop` hook that blocked the agent from
     /// stopping. Injected in-turn so the model keeps working within the same turn.
     StopHookFeedback,
@@ -155,7 +158,8 @@ impl SyntheticReason {
             | Self::SubagentCompleted
             | Self::NotificationDrain
             | Self::GoalClassifierNudge
-            | Self::SchedulerFired => true,
+            | Self::SchedulerFired
+            | Self::AgentMessage => true,
             Self::CompactionMeta
             | Self::SystemReminder
             | Self::ProjectInstructions
@@ -1626,7 +1630,10 @@ impl ConversationRequest {
                     // DeepSeek Responses has no opaque provider-native history
                     // carriers today; keep the match explicit so new dialects
                     // fail closed until their replay contract is defined.
-                    (Some(crate::ResponsesDialect::DeepSeek), _) => None,
+                    (
+                        Some(crate::ResponsesDialect::DeepSeek | crate::ResponsesDialect::Meta),
+                        _,
+                    ) => None,
                     _ => None,
                 };
                 if let Some(value) = value {
@@ -2484,6 +2491,21 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SchedulerFired),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Mailbox message delivered from a peer agent in the same collaboration
+    /// team. Tagged distinctly from the completion auto-wakes so trace tooling
+    /// and compaction can tell peer traffic apart from lifecycle events.
+    pub fn agent_message(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::AgentMessage),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,

@@ -131,6 +131,65 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
         let gateway = self.agent_ref.get().gateway.clone();
         crate::agent::subagent::present_child_completion(completion, &gateway);
     }
+    fn deliver_root_followup(
+        &self,
+        root_session_id: &str,
+        message: &xai_grok_tools::implementations::grok_build::task::types::AgentMailboxMessage,
+    ) -> bool {
+        let session_id = acp::SessionId::new(root_session_id);
+        let command_tx = self
+            .agent_ref
+            .get()
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .map(|handle| handle.cmd_tx.clone());
+        command_tx.is_some_and(|tx| {
+            tx.send(crate::session::SessionCommand::AgentMessage {
+                message: message.clone(),
+            })
+            .is_ok()
+        })
+    }
+    fn on_agent_message(
+        &self,
+        message: &xai_grok_tools::implementations::grok_build::task::types::AgentMailboxMessage,
+        status: xai_grok_tools::implementations::grok_build::task::types::AgentMessageDeliveryStatus,
+    ) {
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            AgentMailboxMessageKind, AgentMessageDeliveryStatus,
+        };
+
+        let this = self.agent_ref.get();
+        let parent_cmd_tx = this
+            .sessions
+            .borrow()
+            .get(&acp::SessionId::new(message.team_scope_id.as_str()))
+            .map(|handle| handle.cmd_tx.clone());
+        crate::agent::subagent::emit_subagent_notification(
+            &this.gateway,
+            &message.team_scope_id,
+            crate::extensions::notification::SessionUpdate::SubagentMessage {
+                message_id: message.message_id.clone(),
+                team_scope_id: message.team_scope_id.clone(),
+                from_agent_id: message.from_agent_id.clone(),
+                to_agent_id: message.to_agent_id.clone(),
+                kind: match message.kind {
+                    AgentMailboxMessageKind::Message => "message",
+                    AgentMailboxMessageKind::FollowupTask => "followup_task",
+                }
+                .to_string(),
+                body: message.body.clone(),
+                status: match status {
+                    AgentMessageDeliveryStatus::Queued => "queued",
+                    AgentMessageDeliveryStatus::Delivered => "delivered",
+                }
+                .to_string(),
+                created_at_ms: message.created_at_ms,
+            },
+            parent_cmd_tx.as_ref(),
+        );
+    }
     fn running_count_changed(&self, running: usize) {
         self.agent_ref
             .get()

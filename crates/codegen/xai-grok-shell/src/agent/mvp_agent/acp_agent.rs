@@ -81,6 +81,19 @@ pub(super) fn deepseek_models_apply_payload(
     }
 }
 
+pub(super) fn meta_models_apply_payload(
+    refreshed: Result<bool, String>,
+    models: acp::SessionModelState,
+) -> serde_json::Value {
+    match refreshed {
+        Ok(refreshed) => serde_json::json!({ "refreshed": refreshed, "models": models }),
+        Err(warning) => {
+            tracing::warn!(%warning, "Meta model query failed; returning embedded models");
+            serde_json::json!({ "refreshed": false, "warning": warning, "models": models })
+        }
+    }
+}
+
 pub(super) fn wafer_models_apply_payload(
     refreshed: Result<bool, String>,
     models: acp::SessionModelState,
@@ -3871,6 +3884,31 @@ impl acp::Agent for MvpAgent {
                     available.values().cloned().collect(),
                 );
                 crate::extensions::to_ext_response(Ok(deepseek_models_apply_payload(
+                    refreshed, models,
+                )))
+            }
+            "open-grok/meta/models/apply" => {
+                let cancelled_subagents = crate::agent::subagent::cancel_for_provider_runtime_change(
+                    &self.subagent_provider_registry,
+                    xai_grok_sampling_types::ModelProvider::Meta,
+                );
+                if cancelled_subagents > 0 {
+                    tracing::warn!(
+                        cancelled_subagents,
+                        "cancelled subagents before Meta runtime credential change"
+                    );
+                }
+                let refreshed = self
+                    .models_manager
+                    .apply_meta_credential_change()
+                    .await
+                    .map_err(|error| error.to_string());
+                let available = self.models_manager.available();
+                let models = acp::SessionModelState::new(
+                    self.models_manager.current_model_id(),
+                    available.values().cloned().collect(),
+                );
+                crate::extensions::to_ext_response(Ok(meta_models_apply_payload(
                     refreshed, models,
                 )))
             }

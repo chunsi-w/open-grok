@@ -1673,6 +1673,91 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
         .await;
 }
 
+/// An `agent_swarm` cohort parks the turn in an orchestration wait. A follow-up
+/// arriving during it must reach the orchestrator without cancelling the turn,
+/// because cancelling would kill every live member. Explicit `send_now` is
+/// promoted to run next but still must not cancel.
+#[tokio::test]
+async fn queue_input_during_agent_swarm_orchestration_wait_does_not_cancel() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+
+            let depth = actor.tool_context.blocking_wait_depth.clone();
+            let swarm_guard = crate::tools::tool_context::BlockingWaitGuard::enter_kind(
+                depth.clone(),
+                xai_grok_tools::implementations::grok_build::task::types::ForegroundWaitKind::Orchestration,
+            );
+            assert_eq!(
+                depth.orchestration_depth(),
+                1,
+                "a swarm await must raise the orchestration depth"
+            );
+            assert_eq!(
+                depth.depth(),
+                0,
+                "a swarm await must not register as an interruptible wait"
+            );
+
+            for (prompt_id, send_now) in [("plain-followup", false), ("explicit-send-now", true)] {
+                let (respond_to, _keep) = oneshot::channel();
+                let cancel = actor
+                    .queue_input(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("follow up"))],
+                        prompt_id.to_string(),
+                        PromptMode::Agent,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        send_now,
+                        None,
+                        /*tool_overrides_update*/ None,
+                        respond_to,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    !cancel,
+                    "a follow-up during a swarm must not cancel the turn (prompt {prompt_id})"
+                );
+            }
+
+            drop(swarm_guard);
+            assert_eq!(
+                depth.orchestration_depth(),
+                0,
+                "guard drop must restore the orchestration depth"
+            );
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["running", "explicit-send-now", "plain-followup"],
+                "the swarm turn keeps the wheel; explicit send-now still runs first after it"
+            );
+        })
+        .await;
+}
+
 /// Synthetic inputs and active goal loops never take the send-now path.
 #[tokio::test]
 async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {

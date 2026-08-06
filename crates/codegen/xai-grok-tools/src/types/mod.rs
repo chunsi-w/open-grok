@@ -7,6 +7,7 @@ pub mod context;
 pub mod definition;
 pub mod description;
 pub mod error;
+pub mod image_generation_provider;
 pub mod memory_backend;
 pub mod output;
 pub mod params_validation;
@@ -29,6 +30,7 @@ pub use compat::{
 };
 pub use context::TruncationConfig;
 pub use definition::{FunctionTool, ToolDefinition, ToolType};
+pub use image_generation_provider::ImageGenerationProvider;
 pub use memory_backend::MemoryBackend;
 pub use process_manager::{KillOutcome, TaskSnapshot, format_system_time_rfc3339};
 pub use schema::GrokIntegerSchema;

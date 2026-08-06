@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_paths::AbsPathBuf;
+use xai_grok_tools::implementations::grok_build::task::types::ForegroundWaitKind;
 use xai_grok_workspace::file_system::{AsyncFileSystem, AsyncFsWrapper};
 use xai_grok_workspace::session::file_state::FileStateHandle;
 use xai_hunk_tracker::HunkTrackerHandle;
@@ -76,17 +77,29 @@ pub struct BlockingWaitState(std::sync::Mutex<BlockingWaitInner>);
 #[derive(Default)]
 struct BlockingWaitInner {
     depth: usize,
+    orchestration_depth: usize,
     generation: u64,
 }
 impl BlockingWaitState {
     pub(crate) fn new() -> Self {
         Self(std::sync::Mutex::new(BlockingWaitInner::default()))
     }
+    /// Interruptible waits the turn is parked in. Non-zero means an arriving
+    /// prompt may abort the turn and run next.
     pub(crate) fn depth(&self) -> usize {
         self.0
             .lock()
             .expect("blocking wait state mutex poisoned")
             .depth
+    }
+    /// Orchestration waits the turn is parked in (an `agent_swarm` cohort).
+    /// Non-zero means an arriving prompt must not abort the turn: cancelling
+    /// would kill every live member along with it.
+    pub(crate) fn orchestration_depth(&self) -> usize {
+        self.0
+            .lock()
+            .expect("blocking wait state mutex poisoned")
+            .orchestration_depth
     }
     #[cfg(test)]
     pub(crate) fn set_depth_for_test(&self, depth: usize) {
@@ -99,20 +112,33 @@ impl BlockingWaitState {
         let mut state = self.0.lock().expect("blocking wait state mutex poisoned");
         state.generation = state.generation.wrapping_add(1);
         state.depth = 0;
+        state.orchestration_depth = 0;
     }
 }
 pub(crate) struct BlockingWaitGuard {
     state: Arc<BlockingWaitState>,
+    kind: ForegroundWaitKind,
     generation: u64,
 }
 impl BlockingWaitGuard {
     pub(crate) fn enter(state: Arc<BlockingWaitState>) -> Self {
+        Self::enter_kind(state, ForegroundWaitKind::Interruptible)
+    }
+    pub(crate) fn enter_kind(state: Arc<BlockingWaitState>, kind: ForegroundWaitKind) -> Self {
         let generation = {
             let mut inner = state.0.lock().expect("blocking wait state mutex poisoned");
-            inner.depth = inner.depth.saturating_add(1);
+            let counter = match kind {
+                ForegroundWaitKind::Interruptible => &mut inner.depth,
+                ForegroundWaitKind::Orchestration => &mut inner.orchestration_depth,
+            };
+            *counter = counter.saturating_add(1);
             inner.generation
         };
-        Self { state, generation }
+        Self {
+            state,
+            kind,
+            generation,
+        }
     }
 }
 impl Drop for BlockingWaitGuard {
@@ -123,7 +149,11 @@ impl Drop for BlockingWaitGuard {
             .lock()
             .expect("blocking wait state mutex poisoned");
         if inner.generation == self.generation {
-            inner.depth = inner.depth.saturating_sub(1);
+            let counter = match self.kind {
+                ForegroundWaitKind::Interruptible => &mut inner.depth,
+                ForegroundWaitKind::Orchestration => &mut inner.orchestration_depth,
+            };
+            *counter = counter.saturating_sub(1);
         }
     }
 }
@@ -131,7 +161,7 @@ pub(crate) fn subagent_foreground_wait(
     state: Arc<BlockingWaitState>,
 ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentForegroundWait {
     xai_grok_tools::implementations::grok_build::task::types::SubagentForegroundWait::new(
-        move || Box::new(BlockingWaitGuard::enter(Arc::clone(&state))),
+        move |kind| Box::new(BlockingWaitGuard::enter_kind(Arc::clone(&state), kind)),
     )
 }
 /// Session-level context. NOT used for tool execution (bridge handles that).

@@ -1,7 +1,7 @@
 ---
 name: imagine
 description: >
-  How to use the image_gen and image_edit tool calls in Grok Build: when to
+  How to use the image_gen and image_edit tool calls in Open Grok: when to
   build a visual with code instead of generating it, prompt-craft,
   reference-first handling of real people, factual grounding, and
   asset-consistency. Load this whenever generating or editing an image is on the
@@ -9,17 +9,19 @@ description: >
   to be made. Tool-usage-driven, not triggered by a user merely mentioning
   images.
 metadata:
-  short-description: "Prompting and workflow guidance for Imagine image tools"
+  short-description: "Prompting and workflow guidance for image tools"
 ---
 
-# Imagine
+# Image Generation
 
-Guidance for the two image tool calls in Grok Build:
+Guidance for Open Grok's two provider-routed image tool calls:
 
 - `image_gen` - generate a **new** image from a text prompt.
 - `image_edit` - modify an **existing** image using a text prompt and source image.
 
 Apply this whenever you're considering or about to call either tool.
+The user chooses Grok Imagine or OpenAI Images in Settings; use the same tool
+names and do not assume or expose provider credentials.
 
 ## Build accurate visuals with code, not the image tools
 

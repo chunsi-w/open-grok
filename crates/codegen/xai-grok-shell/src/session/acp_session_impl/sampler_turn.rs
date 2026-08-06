@@ -202,11 +202,42 @@ fn is_loopback_base_url(url: &str) -> bool {
     }
 }
 
+fn image_tool_allowed_for_provider(
+    image_provider: Option<crate::agent::config::ImageGenerationProvider>,
+    active_provider: xai_grok_sampling_types::ModelProvider,
+) -> bool {
+    use crate::agent::config::ImageGenerationProvider;
+    match image_provider {
+        Some(ImageGenerationProvider::OpenAi) => true,
+        Some(ImageGenerationProvider::Grok) => active_provider.profile().allows_xai_services(),
+        None => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnAuthRefreshRoute {
     CodexOAuth,
     XaiSession,
     ConfigApiKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolAuthRefreshRoute {
+    XaiSession,
+    CodexOAuth,
+}
+
+fn tool_auth_refresh_route_for_provider(
+    tool_name: &str,
+    image_provider: Option<crate::agent::config::ImageGenerationProvider>,
+) -> ToolAuthRefreshRoute {
+    if matches!(tool_name, "image_gen" | "image_edit")
+        && image_provider == Some(crate::agent::config::ImageGenerationProvider::OpenAi)
+    {
+        ToolAuthRefreshRoute::CodexOAuth
+    } else {
+        ToolAuthRefreshRoute::XaiSession
+    }
 }
 
 pub(super) fn turn_auth_refresh_route(
@@ -232,11 +263,12 @@ pub(super) fn turn_auth_refresh_route(
         }
     }
 }
-/// Run a tool call; on an auth-shaped failure, attempt recovery via
-/// `AuthManager` and one retry. When `shared_recovery` is `Some`, concurrent
-/// 401s in the same batch deduplicate via `OnceCell::get_or_init`.
+/// Run a tool call; on an auth-shaped failure, attempt one provider-specific
+/// refresh and one retry. When `shared_recovery` is `Some`, concurrent 401s in
+/// the same provider partition deduplicate via `OnceCell::get_or_init`.
 pub(super) async fn call_with_auth_retry<F, Fut>(
     auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
+    refresh_route: ToolAuthRefreshRoute,
     shared_recovery: Option<&tokio::sync::OnceCell<bool>>,
     tool_name: &str,
     mut call: F,
@@ -255,13 +287,23 @@ where
     if !is_auth_tool_error(err) {
         return result;
     }
-    let Some(am) = auth_manager else {
-        return result;
+    let recover = || async {
+        match refresh_route {
+            ToolAuthRefreshRoute::XaiSession => {
+                let Some(am) = auth_manager else {
+                    return false;
+                };
+                am.try_recover_unauthorized(crate::auth::recovery::RecoverySource::Background)
+                    .await
+            }
+            ToolAuthRefreshRoute::CodexOAuth => {
+                matches!(crate::codex_auth::force_refresh().await, Ok(Some(_)))
+            }
+        }
     };
-    let src = crate::auth::recovery::RecoverySource::Background;
     let recovered = match shared_recovery {
-        Some(cell) => *cell.get_or_init(|| am.try_recover_unauthorized(src)).await,
-        None => am.try_recover_unauthorized(src).await,
+        Some(cell) => *cell.get_or_init(recover).await,
+        None => recover().await,
     };
     if recovered {
         tracing::info!(
@@ -385,10 +427,17 @@ impl SessionActor {
         .ok()
     }
 
-    /// Keep provider-specific local tools out of Codex requests and Code Mode
-    /// dispatch. Search may cross providers only through an explicit
-    /// non-default model route; xAI media tools have no equivalent explicit
-    /// provider-neutral opt-in and stay xAI-only.
+    pub(super) fn tool_auth_refresh_route(&self, tool_name: &str) -> ToolAuthRefreshRoute {
+        tool_auth_refresh_route_for_provider(
+            tool_name,
+            self.rebuild_spec.image_gen_config.provider(),
+        )
+    }
+
+    /// Keep provider-specific local tools out of incompatible requests and
+    /// Code Mode dispatch. Selecting OpenAI Images is an explicit
+    /// cross-provider opt-in backed by isolated Codex credentials; the default
+    /// Grok Imagine route remains xAI-only.
     pub(crate) fn local_tool_allowed_for_provider(
         &self,
         tool_name: &str,
@@ -404,11 +453,17 @@ impl SessionActor {
             // two never coexist on one request.
             return !provider.profile().allows_xai_services();
         }
+        if matches!(tool_name, "image_gen" | "image_edit") {
+            return image_tool_allowed_for_provider(
+                self.rebuild_spec.image_gen_config.provider(),
+                provider,
+            );
+        }
         if provider.profile().allows_xai_services() {
             return true;
         }
         match tool_name {
-            "image_gen" | "image_edit" | "image_to_video" | "reference_to_video" => false,
+            "image_to_video" | "reference_to_video" => false,
             // Memory storage and FTS are local/provider-neutral. Semantic
             // search may independently use the user's connected xAI embedding
             // route while chat runs through Codex.
@@ -1513,6 +1568,13 @@ impl SessionActor {
                     );
                     false
                 }
+                xai_grok_sampling_types::ModelProvider::Meta => {
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        "Meta API-key authentication cannot be refreshed; surfacing 401",
+                    );
+                    false
+                }
                 xai_grok_sampling_types::ModelProvider::Wafer => {
                     tracing::warn!(
                         session_id = %self.session_info.id.0,
@@ -2160,6 +2222,58 @@ impl SessionActor {
 
 fn session_codex_multi_agent_v2(model_supports_policy: bool, session_policy_enabled: bool) -> bool {
     model_supports_policy && session_policy_enabled
+}
+
+#[cfg(test)]
+mod image_tool_provider_tests {
+    use super::{
+        ToolAuthRefreshRoute, image_tool_allowed_for_provider, tool_auth_refresh_route_for_provider,
+    };
+    use crate::agent::config::ImageGenerationProvider;
+    use xai_grok_sampling_types::ModelProvider;
+
+    #[test]
+    fn grok_stays_xai_only_while_openai_is_explicitly_cross_provider() {
+        assert!(image_tool_allowed_for_provider(
+            Some(ImageGenerationProvider::Grok),
+            ModelProvider::Xai,
+        ));
+        assert!(!image_tool_allowed_for_provider(
+            Some(ImageGenerationProvider::Grok),
+            ModelProvider::Codex,
+        ));
+        assert!(image_tool_allowed_for_provider(
+            Some(ImageGenerationProvider::OpenAi),
+            ModelProvider::Codex,
+        ));
+        assert!(image_tool_allowed_for_provider(
+            Some(ImageGenerationProvider::OpenAi),
+            ModelProvider::Xai,
+        ));
+        assert!(!image_tool_allowed_for_provider(None, ModelProvider::Xai));
+    }
+
+    #[test]
+    fn openai_image_401s_refresh_only_codex_auth() {
+        assert_eq!(
+            tool_auth_refresh_route_for_provider(
+                "image_gen",
+                Some(ImageGenerationProvider::OpenAi),
+            ),
+            ToolAuthRefreshRoute::CodexOAuth,
+        );
+        assert_eq!(
+            tool_auth_refresh_route_for_provider("image_edit", Some(ImageGenerationProvider::Grok)),
+            ToolAuthRefreshRoute::XaiSession,
+        );
+        assert_eq!(
+            tool_auth_refresh_route_for_provider(
+                "web_search",
+                Some(ImageGenerationProvider::OpenAi)
+            ),
+            ToolAuthRefreshRoute::XaiSession,
+        );
+    }
 }
 
 #[cfg(test)]

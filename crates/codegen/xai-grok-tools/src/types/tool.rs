@@ -89,6 +89,7 @@ pub enum ToolKind {
     MemoryGet,
     Task,
     AgentSwarm,
+    AgentCollaboration,
     EnterPlan,
     ExitPlan,
     AskUser,

@@ -1306,6 +1306,25 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "image_generation_provider" => {
+            let SettingValue::Enum(value) = value else {
+                return Err(kind_mismatch(
+                    "image_generation_provider",
+                    "Enum",
+                    &value,
+                ));
+            };
+            let provider =
+                xai_grok_shell::agent::config::ImageGenerationProvider::from_canonical(value)
+                    .ok_or_else(|| {
+                        format!(
+                            "persist_setting(image_generation_provider) unknown value: {value}"
+                        )
+                    })?;
+            xai_grok_shell::util::config::set_image_generation_provider(provider)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "toolset.ask_user_question.timeout_enabled" => {
             let SettingValue::Bool(b) = value else {
                 return Err(

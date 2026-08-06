@@ -1,6 +1,6 @@
 # Multi-provider architecture
 
-How Open Grok treats **xAI**, **OpenAI Codex**, **Kimi** (Platform vs Code), **Fireworks AI**, **DeepSeek API direct**, **Wafer AI**, and **OpenCode Go** without leaking credentials, tools, or opaque history.
+How Open Grok treats **xAI**, **OpenAI Codex**, **Kimi** (Platform vs Code), **Fireworks AI**, **DeepSeek API direct**, **Meta API**, **Wafer AI**, and **OpenCode Go** without leaking credentials, tools, or opaque history.
 
 **Canonical contracts:**
 
@@ -36,6 +36,7 @@ Adapters (credential-free): `xai-grok-sampler/src/provider.rs`.
 | Kimi | Chat | none | client function tools | API key only | **denied** |
 | Fireworks AI | Chat | none | client function tools | API key only | **denied** |
 | DeepSeek direct | Chat, Responses (V4 Flash) | DeepSeek | OpenAI hosted search + client functions | API key only | **denied** |
+| Meta API | Responses | Meta | OpenAI hosted search + client functions | API key only | **denied** |
 | Wafer AI | Chat | none | client function tools | API key only | **denied** |
 | OpenCode Go | Chat, Messages (per model) | none | client function tools | API key only | **denied** |
 
@@ -79,6 +80,10 @@ DeepSeek direct
   xai-grok-shell/src/deepseek_models.rs         # curated direct catalog, live availability, trusted host
   auth/storage.rs                               # deepseek::api_key (generic provider scope)
 
+Meta API
+  xai-grok-shell/src/meta_models.rs             # curated Muse Spark catalog, live availability, trusted host
+  auth/storage.rs                               # meta::api_key (generic provider scope)
+
 Wafer AI
   xai-grok-shell/src/wafer_models.rs            # dynamic /models catalog, trusted host
   auth/storage.rs                               # wafer::api_key (generic provider scope)
@@ -111,6 +116,7 @@ Home root: `$OPENGROK_HOME` or `~/.opengrok` via `xai_grok_config::grok_home()`.
 | Kimi Code | `auth.json` scope `kimi_code::api_key` | Settings / `/login kimi` |
 | Fireworks AI | `auth.json` scope `fireworks::api_key` | Settings / `/login fireworks` |
 | DeepSeek direct | `auth.json` scope `deepseek::api_key` | Settings / `/login deepseek` |
+| Meta API | `auth.json` scope `meta::api_key` or `META_API_KEY` | Settings / `/login meta` / environment |
 | Wafer AI | `auth.json` scope `wafer::api_key` | Settings / `/login wafer` |
 | OpenCode Go | `auth.json` scope `opencode_go::api_key` | Settings / `/login opencode-go` |
 | Perplexity Search fallback | `auth.json` scope `perplexity::api_key` | Settings |
@@ -131,14 +137,21 @@ Also isolated:
    Platform embeds/discovers `kimi-k3` on Moonshot; Code embeds/discovers `k3`,
    `k3-256k`, and the `kimi-for-coding*` family on `api.kimi.com/coding/v1`.
 6. **DeepSeek direct credentials are host-scoped.** UI-stored keys are sent only to the official trusted API host; `DEEPSEEK_API_KEY` may accompany an explicit process-level base-URL override. `deepseek-v4-flash` uses DeepSeek's stateless Responses API; V4 Pro remains on Chat Completions until the provider exposes Responses support for it.
-7. **OpenCode Go is opt-in per model.** Its live `/models` IDs are intersected with canonical metadata; unsupported or unclassified models are omitted. The enabled list defaults empty, and only enabled entries reach normal model settings or subagent selection.
-8. **OpenCode Go transport is model-owned.** `@ai-sdk/anthropic` entries use Messages + `x-api-key`; OpenAI-compatible entries use Chat Completions + Bearer. Never choose the protocol from the provider alone.
-9. **Wafer AI is API-key-only and provider-local.** `WAFER_API_KEY` is sent only to `https://pass.wafer.ai/v1`; its dynamic `/models` catalog, client function tools, and standard metadata do not inherit xAI behavior. Wafer has no native hosted web search.
-10. **xAI-only services** (relay, some uploads, etc.) close via monotonic export boundary after non-xAI denied profiles. Compatibility field name remains `ever_used_codex` even when the triggering provider is not Codex; subagents mark the parent tree.
-11. **xAI media / Imagine** must not receive another provider's credential; hide media tools outside eligible xAI sessions.
-12. **Hosted search** is dialect-scoped: xAI web/X search vs OpenAI `web_search`. Optional client search fallbacks are declared only when the provider profile permits them. Never infer this from model names or URLs.
-13. **Opaque history** (e.g. Codex compaction carriers, xAI-only items) is projected only by the matching dialect.
-14. **Standalone search is route-scoped.** Official Codex OAuth Responses
+7. **Meta API credentials are host-scoped.** `META_API_KEY` is sent to `https://api.meta.ai/v1`; an explicit process-level `OPENGROK_META_API_BASE_URL` override may redirect the environment key, while stored provider credentials remain restricted to the official host. Meta uses stateless Responses, native hosted web search, and only the curated Muse Spark catalog.
+8. **OpenCode Go is opt-in per model.** Its live `/models` IDs are intersected with canonical metadata; unsupported or unclassified models are omitted. The enabled list defaults empty, and only enabled entries reach normal model settings or subagent selection.
+9. **OpenCode Go transport is model-owned.** `@ai-sdk/anthropic` entries use Messages + `x-api-key`; OpenAI-compatible entries use Chat Completions + Bearer. Never choose the protocol from the provider alone.
+10. **Wafer AI is API-key-only and provider-local.** `WAFER_API_KEY` is sent only to `https://pass.wafer.ai/v1`; its dynamic `/models` catalog, client function tools, and standard metadata do not inherit xAI behavior. Wafer has no native hosted web search.
+11. **xAI-only services** (relay, some uploads, etc.) close via monotonic export boundary after non-xAI denied profiles. Compatibility field name remains `ever_used_codex` even when the triggering provider is not Codex; subagents mark the parent tree.
+12. **Image generation is explicitly routed.** The default `grok` route uses
+    xAI Imagine credentials and remains hidden outside eligible xAI sessions.
+    Selecting `openai` in Settings is an explicit cross-provider opt-in: it
+    uses only the isolated Codex OAuth store (ChatGPT login — no OpenAI API
+    key path, mirroring upstream's `uses_codex_backend` gate), calls the Codex
+    Images endpoint, blocks known ChatGPT Free accounts, and never reuses an
+    xAI credential. Video generation remains xAI-only.
+13. **Hosted search** is dialect-scoped: xAI web/X search vs OpenAI `web_search`. Optional client search fallbacks are declared only when the provider profile permits them. Never infer this from model names or URLs.
+14. **Opaque history** (e.g. Codex compaction carriers, xAI-only items) is projected only by the matching dialect.
+15. **Standalone search is route-scoped.** Official Codex OAuth Responses
     routes default to the provider-local `/alpha/search` endpoint. API-key and
     custom Responses routes must opt in with
     `supports_standalone_web_search = true`; when unavailable, hosted search
@@ -154,15 +167,15 @@ Also isolated:
 
 ### Adapter differences (summary)
 
-| Behavior | xAI | Codex | Kimi | Fireworks | DeepSeek | Wafer | OpenCode Go |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Private headers | `x-grok-*` | stripped | stripped | stripped | stripped | stripped | stripped |
-| Doom-loop opt-in | yes | no | no | no | no | no | no |
-| Responses extras | minimal | Max/Ultra mapping, multi-agent mode, reasoning summary | N/A | N/A | stateless fields; effort normalized to none/low/high/max | N/A | N/A |
-| Prompt cache key | no | session id | no | no | no | no | no |
-| Sticky turn state | no | `x-codex-turn-state` | no | no | no | no | no |
-| Unknown `response.*` events | strict | ignore unknown side-channels when opted | N/A | N/A | strict | N/A | N/A |
-| Chat sanitization | — | — | clears temp/top_p/penalties | schema normalization | strips internal message model IDs | standard | per backend |
+| Behavior | xAI | Codex | Kimi | Fireworks | DeepSeek | Meta | Wafer | OpenCode Go |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Private headers | `x-grok-*` | stripped | stripped | stripped | stripped | stripped | stripped | stripped |
+| Doom-loop opt-in | yes | no | no | no | no | no | no | no |
+| Responses extras | minimal | Max/Ultra mapping, multi-agent mode, reasoning summary | N/A | N/A | stateless fields; effort normalized to none/low/high/max | stateless fields; preserves low/medium/high/xhigh | N/A | N/A |
+| Prompt cache key | no | session id | no | no | no | no | no | no |
+| Sticky turn state | no | `x-codex-turn-state` | no | no | no | no | no | no |
+| Unknown `response.*` events | strict | ignore unknown side-channels when opted | N/A | N/A | strict | strict | N/A | N/A |
+| Chat sanitization | — | — | clears temp/top_p/penalties | schema normalization | strips internal message model IDs | N/A | standard | per backend |
 
 ### Compaction
 
@@ -198,7 +211,7 @@ Follow [`../provider-architecture.md`](../provider-architecture.md):
    - API-key: `ApiKeyOnly` policy, scoped storage, empty live resolver.
    - OAuth: **separate file** (like `codex-auth.json`), own `BearerResolver`, fail-closed identity, never xAI `AuthManager`.
 5. If `xai_services: Denied`, participate in monotonic export boundary (`ever_used_codex` field name frozen for compatibility).
-6. Filter hosted + local tools by provider; never reuse another provider’s credentials for media/search.
+6. Filter hosted + local tools by provider; never reuse another provider’s credentials for media/search. The user-selected OpenAI Images route is the explicit exception for cross-provider image use, but its Codex credential and endpoint remain isolated.
 7. Add table-driven registry coverage + request/stream/tool/credential-isolation/retry/export-boundary tests.
 8. Custom endpoints may reuse an existing profile + explicit API key; unknown remote catalog providers fail closed.
 

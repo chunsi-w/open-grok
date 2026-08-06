@@ -92,6 +92,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::MemoryGet,
     ToolKind::Task,
     ToolKind::AgentSwarm,
+    ToolKind::AgentCollaboration,
     ToolKind::EnterPlan,
     ToolKind::ExitPlan,
     ToolKind::AskUser,
@@ -129,7 +130,8 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
     match kind {
         // Meta tools: always allowed.
-        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate => true,
+        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate
+        | AgentCollaboration => true,
 
         // Read class.
         Read | MemoryGet | MemorySearch => {

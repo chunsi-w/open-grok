@@ -8,9 +8,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{
-    ActiveSubagentSummary, SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSnapshot,
-    SubagentSnapshotStatus, SubagentValidateTypeOutcome,
+    ActiveSubagentSummary, AgentMailboxMessage, AgentMessageDeliveryStatus,
+    SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
+    SubagentValidateTypeOutcome, WaitAgentMessagesOutput,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -38,6 +39,9 @@ pub trait ChildControl: 'static {
 
     fn progress(&self) -> Self::ProgressFuture;
     fn cancel(&self);
+    fn deliver_followup(&self, _message: &AgentMailboxMessage) -> bool {
+        false
+    }
 }
 
 /// Data reported when runtime initialization has produced a live child.
@@ -116,6 +120,21 @@ pub trait ChildRunner: 'static {
     ) -> Self::DescribeFuture;
 
     fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>);
+
+    fn deliver_root_followup(
+        &self,
+        _root_session_id: &str,
+        _message: &AgentMailboxMessage,
+    ) -> bool {
+        false
+    }
+
+    fn on_agent_message(
+        &self,
+        _message: &AgentMailboxMessage,
+        _status: AgentMessageDeliveryStatus,
+    ) {
+    }
 
     fn running_count_changed(&self, _running: usize) {}
 
@@ -271,6 +290,11 @@ pub(super) struct CompletedChild {
 pub(super) struct BlockingWaiter {
     pub(super) deadline: tokio::time::Instant,
     pub(super) respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+}
+
+pub(super) struct AgentMailboxWaiter {
+    pub(super) deadline: tokio::time::Instant,
+    pub(super) respond_to: oneshot::Sender<WaitAgentMessagesOutput>,
 }
 
 pub(super) struct BufferedCompletion {

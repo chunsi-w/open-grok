@@ -568,6 +568,15 @@ fn handle_editing_secret(state: &mut SettingsModalState, key: &KeyEvent) -> Sett
                     SettingsKeyOutcome::Action(action)
                 };
             }
+            if setting_key == "meta_api_key" {
+                let action = Action::SetMetaApiKey { key: secret };
+                return if state.entry_point == SettingsEntryPoint::ProviderLogin {
+                    SettingsKeyOutcome::ActionAndClose(action)
+                } else {
+                    state.transition_to_browse();
+                    SettingsKeyOutcome::Action(action)
+                };
+            }
             if setting_key == "opencode_go_api_key" {
                 let action = Action::SetOpenCodeGoApiKey { key: secret };
                 return if state.entry_point == SettingsEntryPoint::ProviderLogin {

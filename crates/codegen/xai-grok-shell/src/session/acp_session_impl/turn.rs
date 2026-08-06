@@ -815,6 +815,11 @@ impl SessionActor {
             crate::session::placeholder_images::attached_image_references(&user_images)
         };
         self.tool_bridge_handle()
+            .update_resource(xai_grok_tools::types::resources::ImageGenerationTurnId(
+                uuid::Uuid::now_v7().to_string(),
+            ))
+            .await;
+        self.tool_bridge_handle()
             .update_resource(xai_grok_tools::types::resources::AttachedImages(
                 attached_image_refs,
             ))
@@ -834,6 +839,9 @@ impl SessionActor {
                 }
                 super::super::PromptOrigin::SubagentCompleted { .. } => {
                     ConversationItem::subagent_completed(user_message)
+                }
+                super::super::PromptOrigin::AgentMessage { .. } => {
+                    ConversationItem::agent_message(user_message)
                 }
                 super::super::PromptOrigin::WorkflowCompleted { .. } => {
                     ConversationItem::notification_drain(user_message)
@@ -2707,6 +2715,13 @@ impl SessionActor {
                     return Err(acp::Error::internal_error().data(
                         "DeepSeek API-key authentication cannot be refreshed automatically",
                     ));
+                }
+                SamplerTurnOutcome::RefreshAuthAndResubmit {
+                    provider: xai_grok_sampling_types::ModelProvider::Meta,
+                    ..
+                } => {
+                    return Err(acp::Error::internal_error()
+                        .data("Meta API-key authentication cannot be refreshed automatically"));
                 }
                 SamplerTurnOutcome::RefreshAuthAndResubmit {
                     provider: xai_grok_sampling_types::ModelProvider::Wafer,

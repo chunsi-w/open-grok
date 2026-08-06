@@ -1966,6 +1966,36 @@ fn successful_model_switch_updates_provider_and_round_trips_xai_access_state() {
 }
 
 #[test]
+fn openai_images_are_not_blocked_by_xai_free_tier() {
+    let mut app = test_app_with_agent();
+    app.primary_provider = PrimaryProvider::Xai;
+    app.subscription_tier = Some("Free".to_owned());
+    app.current_ui.image_generation_provider =
+        Some(xai_grok_shell::agent::config::ImageGenerationProvider::OpenAi);
+
+    app.apply_tier_restrictions();
+
+    assert!(
+        !app.tier_restricted_commands
+            .iter()
+            .any(|name| name == "imagine"),
+        "OpenAI Images uses Codex entitlement, not the xAI image tier",
+    );
+    assert!(
+        app.tier_restricted_commands
+            .iter()
+            .any(|name| name == "imagine-video"),
+        "video generation remains xAI-only",
+    );
+    assert!(
+        app.tier_restricted_commands
+            .iter()
+            .any(|name| name == "voice"),
+        "unrelated xAI tier restrictions must remain active",
+    );
+}
+
+#[test]
 fn provider_transition_fans_usage_visibility_into_existing_slash_surfaces() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

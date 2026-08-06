@@ -273,6 +273,8 @@ fn normalize_response_compat(value: &mut serde_json::Value, default_status: &str
     };
 
     insert_json_default(response, "created_at", serde_json::json!(0));
+    normalize_integral_u64(response, "created_at");
+    normalize_integral_u64(response, "completed_at");
     insert_json_default(response, "id", serde_json::json!(""));
     insert_json_default(response, "model", serde_json::json!(""));
     insert_json_default(response, "object", serde_json::json!("response"));
@@ -338,6 +340,21 @@ fn normalize_response_compat(value: &mut serde_json::Value, default_status: &str
         {
             insert_json_default(details, "reasoning_tokens", serde_json::json!(0));
         }
+    }
+}
+
+fn normalize_integral_u64(object: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    let Some(value) = object.get_mut(field) else {
+        return;
+    };
+    if value.as_u64().is_some() {
+        return;
+    }
+    let Some(number) = value.as_f64() else {
+        return;
+    };
+    if number.is_finite() && number >= 0.0 && number <= u64::MAX as f64 && number.fract() == 0.0 {
+        *value = serde_json::Value::Number((number as u64).into());
     }
 }
 
@@ -5504,6 +5521,8 @@ mod tests {
             "response": {
                 "id": "resp_x_search",
                 "object": "response",
+                "created_at": 1785971246.0,
+                "completed_at": 1785971249.0,
                 "model": "grok-4.5",
                 "status": "completed",
                 "output": [{
@@ -5522,7 +5541,8 @@ mod tests {
             panic!("expected normalized ResponseCompleted");
         };
         assert_eq!(event.sequence_number, 0);
-        assert_eq!(event.response.created_at, 0);
+        assert_eq!(event.response.created_at, 1_785_971_246);
+        assert_eq!(event.response.completed_at, Some(1_785_971_249));
         let usage = event
             .response
             .usage
@@ -5540,6 +5560,30 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&call.input).unwrap(),
             serde_json::json!({"type": "search", "query": "OpenAI Codex"}),
         );
+    }
+
+    #[test]
+    fn deserialize_response_created_normalizes_integral_float_timestamp() {
+        let sse = serde_json::json!({
+            "type": "response.created",
+            "response": {
+                "id": "resp_meta",
+                "object": "response",
+                "created_at": 1785971125.0,
+                "model": "muse-spark-1.2",
+                "status": "in_progress",
+                "output": []
+            }
+        })
+        .to_string();
+
+        let event =
+            deserialize_response_event_for_adapter(&sse, provider_adapter(ModelProvider::Meta))
+                .expect("Meta response.created should accept an integral float timestamp");
+        let rs::ResponseStreamEvent::ResponseCreated(event) = event else {
+            panic!("expected ResponseCreated");
+        };
+        assert_eq!(event.response.created_at, 1_785_971_125);
     }
 
     #[test]

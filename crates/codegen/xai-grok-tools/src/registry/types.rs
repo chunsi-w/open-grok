@@ -701,6 +701,10 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::WaitTasksTool>();
         b.register::<grok_build::TaskTool>();
         b.register::<grok_build::AgentSwarmTool>();
+        b.register::<grok_build::ListAgentsTool>();
+        b.register::<grok_build::SendAgentMessageTool>();
+        b.register::<grok_build::FollowupAgentTaskTool>();
+        b.register::<grok_build::WaitAgentTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register::<grok_build::WebRunTool>();
         b.register::<grok_build::XSearchTool>();

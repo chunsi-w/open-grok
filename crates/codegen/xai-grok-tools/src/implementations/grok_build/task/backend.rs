@@ -13,12 +13,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
-    SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
-    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
-    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
+    AgentListRequest, AgentMailboxIdentity, AgentMailboxMessage, AgentMailboxWaitRequest,
+    AgentMessageRequest, AgentMessageSendOutput, ListAgentsOutput, SpawnedSubagentRef,
+    SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentDescribeOutcome,
+    SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest, SubagentInspection,
+    SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
     SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
     SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
-    SubagentValidateTypeRequest,
+    SubagentValidateTypeRequest, WaitAgentMessagesOutput,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
@@ -50,6 +52,35 @@ pub trait SubagentBackend: Send + Sync + 'static {
 
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
+
+    async fn list_agents(&self, identity: AgentMailboxIdentity) -> ListAgentsOutput {
+        ListAgentsOutput {
+            team_scope_id: identity.team_scope_id,
+            agents: Vec::new(),
+        }
+    }
+
+    async fn send_agent_message(
+        &self,
+        identity: AgentMailboxIdentity,
+        target: &str,
+        message: AgentMailboxMessage,
+    ) -> Result<AgentMessageSendOutput, String> {
+        let _ = (identity, target, message);
+        Err("Agent mailbox is unavailable in this host".to_string())
+    }
+
+    async fn wait_agent_messages(
+        &self,
+        identity: AgentMailboxIdentity,
+        timeout_ms: u64,
+    ) -> WaitAgentMessagesOutput {
+        let _ = (identity, timeout_ms);
+        WaitAgentMessagesOutput {
+            messages: Vec::new(),
+            timed_out: true,
+        }
+    }
 
     /// Validate a subagent type synchronously before spawning.
     /// Returns `ValidationUnavailable` on channel close / responder drop / timeout.
@@ -364,6 +395,74 @@ impl SubagentBackend for ChannelBackend {
             return SubagentCancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
+    }
+
+    async fn list_agents(&self, identity: AgentMailboxIdentity) -> ListAgentsOutput {
+        let team_scope_id = identity.team_scope_id.clone();
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::ListAgents(AgentListRequest {
+                identity,
+                respond_to,
+            }))
+            .is_err()
+        {
+            return ListAgentsOutput {
+                team_scope_id,
+                agents: Vec::new(),
+            };
+        }
+        response_rx.await.unwrap_or(ListAgentsOutput {
+            team_scope_id,
+            agents: Vec::new(),
+        })
+    }
+
+    async fn send_agent_message(
+        &self,
+        identity: AgentMailboxIdentity,
+        target: &str,
+        message: AgentMailboxMessage,
+    ) -> Result<AgentMessageSendOutput, String> {
+        let (respond_to, response_rx) = oneshot::channel();
+        self.tx
+            .send(SubagentEvent::SendAgentMessage(AgentMessageRequest {
+                identity,
+                target: target.to_owned(),
+                message,
+                respond_to,
+            }))
+            .map_err(|_| "Subagent coordinator channel closed".to_string())?;
+        response_rx
+            .await
+            .map_err(|_| "Subagent coordinator dropped the message response".to_string())?
+    }
+
+    async fn wait_agent_messages(
+        &self,
+        identity: AgentMailboxIdentity,
+        timeout_ms: u64,
+    ) -> WaitAgentMessagesOutput {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::WaitAgentMessages(AgentMailboxWaitRequest {
+                identity,
+                timeout_ms,
+                respond_to,
+            }))
+            .is_err()
+        {
+            return WaitAgentMessagesOutput {
+                messages: Vec::new(),
+                timed_out: true,
+            };
+        }
+        response_rx.await.unwrap_or(WaitAgentMessagesOutput {
+            messages: Vec::new(),
+            timed_out: true,
+        })
     }
 
     async fn validate_type(

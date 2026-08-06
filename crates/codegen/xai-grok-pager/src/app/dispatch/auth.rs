@@ -27,12 +27,14 @@ pub(super) fn dispatch_open_login_provider_picker(app: &mut AppView) -> Vec<Effe
     let kimi_status = super::settings::ui::kimi_api_key_status();
     let fireworks_status = super::settings::ui::fireworks_api_key_status();
     let deepseek_status = super::settings::ui::deepseek_api_key_status();
+    let meta_status = super::settings::ui::meta_api_key_status();
     let opencode_go_status = super::settings::ui::opencode_go_api_key_status();
     let wafer_status = super::settings::ui::wafer_api_key_status();
     let items = crate::slash::commands::login::provider_items(
         Some(kimi_status),
         Some(fireworks_status),
         Some(deepseek_status),
+        Some(meta_status),
         Some(opencode_go_status),
         Some(wafer_status),
     );
@@ -151,6 +153,7 @@ fn select_startup_model(
             PrimaryProvider::Kimi => "Kimi",
             PrimaryProvider::Fireworks => "Fireworks AI",
             PrimaryProvider::DeepSeek => "DeepSeek",
+            PrimaryProvider::Meta => "Meta API",
             PrimaryProvider::OpenCodeGo => "OpenCode Go",
             PrimaryProvider::Wafer => "Wafer AI",
         };

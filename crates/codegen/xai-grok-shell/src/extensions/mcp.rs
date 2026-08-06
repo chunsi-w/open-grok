@@ -50,7 +50,7 @@ pub mod mcp_methods {
 }
 use crate::agent::MvpAgent;
 use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
-use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpServerName, McpState};
+use crate::session::mcp_servers::{McpClient, McpServerName, McpState};
 
 // ── Wire types: mcp/list ────────────────────────────────────────────
 
@@ -651,7 +651,7 @@ pub(crate) async fn build_mcp_status(
 
     for client in &clients {
         let name = client.server_name().to_string();
-        let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
+        let prefix = crate::session::mcp_servers::mcp_tool_name_prefix(&name);
 
         let healthy = client.is_healthy().await;
         if let Some(ew) = event_writer {
@@ -693,8 +693,10 @@ pub(crate) async fn build_mcp_status(
 
             // Include disabled tools from stashed registrations.
             for (qname, desc) in &disabled_regs {
-                if qname.starts_with(&prefix) {
-                    let unqualified = qname.strip_prefix(&prefix).unwrap_or(qname).to_string();
+                if let Some((server_name, unqualified)) =
+                    crate::session::mcp_servers::parse_mcp_tool_name(qname)
+                    && server_name == name
+                {
                     let meta = mcp_tool_meta.get(qname).cloned();
                     tools.push(McpToolEntry {
                         name: unqualified,

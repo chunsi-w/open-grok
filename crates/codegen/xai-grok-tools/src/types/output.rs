@@ -124,6 +124,9 @@ impl MediaGenOutput {
         .to_string()
     }
 }
+use crate::implementations::grok_build::task::types::{
+    AgentMessageSendOutput, ListAgentsOutput, WaitAgentMessagesOutput,
+};
 use crate::implementations::grok_build::todo::{TodoItem, TodoState};
 use crate::implementations::skills::skill::SkillOutput;
 use crate::util::truncate::{DEFAULT_SOFT_WRAP_WIDTH, soft_wrap_lines};
@@ -646,6 +649,9 @@ pub enum ToolOutput {
     CodexGrepFiles(CodexGrepFilesOutput),
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
+    ListAgents(ListAgentsOutput),
+    AgentMessageSend(AgentMessageSendOutput),
+    WaitAgentMessages(WaitAgentMessagesOutput),
     EnterPlanMode(EnterPlanModeOutput),
     ExitPlanMode(ExitPlanModeOutput),
     AskUserQuestion(AskUserQuestionOutput),
@@ -1048,6 +1054,19 @@ impl ToolOutput {
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::Workflow(o) => o.message.clone(),
+            ToolOutput::ListAgents(o) => serde_json::to_string_pretty(o).unwrap_or_default(),
+            ToolOutput::AgentMessageSend(o) => serde_json::to_string_pretty(o).unwrap_or_default(),
+            ToolOutput::WaitAgentMessages(o) => {
+                if o.messages.is_empty() {
+                    if o.timed_out {
+                        "No agent messages arrived before the wait expired.".into()
+                    } else {
+                        "No agent messages are queued.".into()
+                    }
+                } else {
+                    serde_json::to_string_pretty(&o.messages).unwrap_or_default()
+                }
+            }
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),
@@ -1343,6 +1362,9 @@ impl xai_tool_runtime::ToolOutput for EnterPlanModeOutput {}
 impl xai_tool_runtime::ToolOutput for ExitPlanModeOutput {}
 impl xai_tool_runtime::ToolOutput for AskUserQuestionOutput {}
 impl xai_tool_runtime::ToolOutput for MCPOutput {}
+impl xai_tool_runtime::ToolOutput for ListAgentsOutput {}
+impl xai_tool_runtime::ToolOutput for AgentMessageSendOutput {}
+impl xai_tool_runtime::ToolOutput for WaitAgentMessagesOutput {}
 #[cfg(test)]
 mod tests {
     use super::*;

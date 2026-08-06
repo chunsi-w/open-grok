@@ -742,6 +742,32 @@ fn dashboard_kimi_login_starts_at_service_picker() {
 }
 
 #[test]
+fn dashboard_meta_login_opens_secure_api_key_editor() {
+    use crate::views::settings_modal::{SettingsEntryPoint, SettingsModalMode};
+
+    let mut app = test_app_with_agent();
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.active_view = ActiveView::AgentDashboard;
+
+    let effects = dispatch(Action::OpenMetaApiKeyEditor, &mut app);
+
+    assert!(effects.is_empty());
+    let state = app
+        .dashboard
+        .as_ref()
+        .and_then(|dashboard| dashboard.settings_modal.as_deref())
+        .expect("dashboard /login meta should open the Settings credential editor");
+    assert_eq!(state.entry_point, SettingsEntryPoint::ProviderLogin);
+    assert!(matches!(
+        state.mode(),
+        SettingsModalMode::EditingSecret {
+            key: "meta_api_key",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn set_kimi_service_live_applies_optimistically_and_is_idempotent() {
     let mut app = test_app_with_agent();
 
@@ -1344,6 +1370,48 @@ fn code_mode_setter_persists_and_rolls_back_with_restart_toast() {
 }
 
 #[test]
+fn image_generation_provider_persists_and_rolls_back() {
+    use xai_grok_shell::agent::config::ImageGenerationProvider;
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetImageGenerationProvider(ImageGenerationProvider::OpenAi),
+        &mut app,
+    );
+    assert_eq!(
+        app.current_ui.image_generation_provider,
+        Some(ImageGenerationProvider::OpenAi)
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistSetting {
+            key: "image_generation_provider",
+            value: crate::settings::SettingValue::Enum("openai"),
+            rollback_value: crate::settings::SettingValue::Enum("grok"),
+        }]
+    ));
+    let toast = app
+        .agents
+        .get(&AgentId(0))
+        .and_then(|agent| agent.toast.as_ref())
+        .map(|(message, _)| message.as_str())
+        .expect("image generation provider setter must show a toast");
+    assert!(toast.contains("OpenAI Images"));
+    assert!(toast.contains("restart Open Grok to apply"));
+
+    let rollback_effects = apply_setting_rollback(
+        &mut app,
+        "image_generation_provider",
+        &crate::settings::SettingValue::Enum("grok"),
+    );
+    assert!(rollback_effects.is_empty());
+    assert_eq!(
+        app.current_ui.image_generation_provider,
+        Some(ImageGenerationProvider::Grok)
+    );
+}
+
+#[test]
 fn local_feature_flag_setter_updates_modal_and_persists() {
     use crate::views::modal::ActiveModal;
 
@@ -1771,6 +1839,14 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "code_mode" => {
             let _ = dispatch(
                 Action::SetCodeMode(xai_grok_shell::agent::config::ToolModePreference::CodeMode),
+                app,
+            );
+        }
+        "image_generation_provider" => {
+            let _ = dispatch(
+                Action::SetImageGenerationProvider(
+                    xai_grok_shell::agent::config::ImageGenerationProvider::OpenAi,
+                ),
                 app,
             );
         }

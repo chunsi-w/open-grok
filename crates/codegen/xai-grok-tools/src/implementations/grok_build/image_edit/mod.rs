@@ -1,5 +1,5 @@
-//! `image_edit` tool — edits or transforms images via the xAI Imagine
-//! `/images/edits` endpoint using one or more reference images.
+//! `image_edit` tool — edits or transforms images via the configured Grok
+//! Imagine or OpenAI Images service using one or more reference images.
 //!
 //! Use cases include likeness preservation, style transfer, subject lock,
 //! remixing, and general image-to-image editing. The model chooses this
@@ -16,13 +16,11 @@ use std::io::Cursor;
 
 use base64::Engine as _;
 use image::ImageReader;
-use reqwest::header::AUTHORIZATION;
 
-use crate::attribution::ToolConsumer;
-use crate::implementations::grok_build::image_gen::{ImageGenClient, ImageGenResponse};
+use crate::implementations::grok_build::image_gen::ImageGenClient;
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::SessionFolder;
+use crate::types::resources::{ImageGenerationTurnId, SessionFolder};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 
@@ -265,7 +263,7 @@ impl crate::types::tool_metadata::ToolMetadata for ImageEditTool {
     }
 
     fn description_template(&self) -> &str {
-        r##"Edit or transform existing image(s) via the xAI Imagine API; use instead of image_gen for image-to-image work (preserve likeness, transfer style, remix). Returns the saved image's absolute path. When telling the user where it was saved, refer to it by its short session-relative path (e.g. `images/1.jpg`) rather than the absolute path, so it renders as a clickable link that opens the image. Each required `image` is one reference — a user-attachment token (e.g. "[Image #1]"), an absolute filesystem path, or a `data:image/...;base64,...` URL (see the `image` parameter for the resolution order and details)."##
+        r##"Edit or transform existing image(s) via the configured image provider; use instead of image_gen for image-to-image work (preserve likeness, transfer style, remix). Returns the saved image's absolute path. When telling the user where it was saved, refer to it by its short session-relative path (for example `images/1.png`) rather than the absolute path, so it renders as a clickable link that opens the image. Each required `image` is one reference — a user-attachment token (for example "[Image #1]"), an absolute filesystem path, or a `data:image/...;base64,...` URL (see the `image` parameter for the resolution order and details)."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -319,9 +317,14 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ));
         }
 
-        let client = {
+        let (client, turn_id) = {
             let res = resources.lock().await;
-            res.require::<ImageGenClient>()?.clone()
+            let client = res.require::<ImageGenClient>()?.clone();
+            let turn_id = res
+                .get::<ImageGenerationTurnId>()
+                .map(|value| value.0.clone())
+                .unwrap_or_else(|| ctx.call_id.as_str().to_owned());
+            (client, turn_id)
         };
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
@@ -349,87 +352,9 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         }
         tracing::info!(count = data_urls.len(), "resolved image references");
 
-        let base = client.base_url().trim_end_matches('/');
-        let url = format!("{base}/images/edits");
-
-        let mut payload = serde_json::json!({
-            "model": client.edit_model(),
-            "prompt": input.prompt,
-            "n": 1,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
-
-        // API: single ref → "image" object; multiple → "images" array.
-        // For single-image edits the API auto-detects aspect ratio from the
-        // input image and ignores the `aspect_ratio` field. Only send it
-        // for multi-image edits where the API needs an explicit ratio.
-        let mut imgs: Vec<serde_json::Value> = data_urls
-            .iter()
-            .map(|u| serde_json::json!({ "url": u }))
-            .collect();
-        if imgs.len() == 1 {
-            payload["image"] = imgs.pop().unwrap();
-        } else {
-            payload["images"] = serde_json::Value::Array(imgs);
-            payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
-        }
-
-        let sent_bearer = client.current_bearer().await;
-        let mut req = client.http().post(&url).json(&payload);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Image edit API request failed: {e}"
-            ))
-        })?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            client.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
-        }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let truncated: String = body.chars().take(200).collect();
-            tracing::warn!(http_status = %status, "Imagine edit API error: {truncated}");
-            return Err(xai_tool_runtime::ToolError::new(
-                xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Image edit failed with HTTP {status}: {truncated}"),
-            )
-            .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
-        }
-
-        let body = response.text().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read image edit response body: {e}"
-            ))
-        })?;
-
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine edit API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image edit response: {e} — body preview: {preview}"
-            ))
-        })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image edit returned no image data.",
-            ));
-        }
-
-        let image_bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
-                ))
-            })?;
+        let image_bytes = client
+            .edit(&input.prompt, &data_urls, &input.aspect_ratio, &turn_id)
+            .await?;
 
         let session_folder = {
             let res = resources.lock().await;

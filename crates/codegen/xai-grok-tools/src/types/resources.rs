@@ -795,6 +795,10 @@ impl AvailableSkills {
 /// Session folder for logs and output files.
 #[derive(Debug, Clone)]
 pub struct SessionFolder(pub PathBuf);
+/// Correlation ID shared by every image generation/edit call in one logical
+/// agent turn. Replaced at the start of each turn and reused across retries.
+#[derive(Debug, Clone)]
+pub struct ImageGenerationTurnId(pub String);
 /// Per-turn registry mapping each attached image's `[Image #N]` display
 /// number to a reference `image_edit` can resolve.
 ///

@@ -233,6 +233,72 @@
       "supports_backend_search": true
     },
     {
+      "id": "meta:muse-spark-1.2",
+      "model": "muse-spark-1.2",
+      "name": "Muse Spark 1.2",
+      "description": "Meta's Muse Spark 1.2 agentic reasoning model",
+      "base_url": "https://api.meta.ai/v1",
+      "context_window": 1000000,
+      "api_backend": "responses",
+      "provider": "meta",
+      "env_key": "META_API_KEY",
+      "tool_mode": "direct",
+      "supported_in_api": true,
+      "reasoning_effort": "medium",
+      "supports_reasoning_effort": true,
+      "reasoning_efforts": [
+        { "value": "low", "description": "Faster responses with lighter reasoning" },
+        { "value": "medium", "description": "Balanced reasoning depth for everyday tasks", "default": true },
+        { "value": "high", "description": "Greater reasoning depth for complex problems" },
+        { "value": "xhigh", "description": "Extra-high reasoning depth for difficult tasks" }
+      ],
+      "supports_backend_search": true
+    },
+    {
+      "id": "meta:muse-spark-1.1",
+      "model": "muse-spark-1.1",
+      "name": "Muse Spark 1.1",
+      "description": "Meta's Muse Spark 1.1 multimodal reasoning model",
+      "base_url": "https://api.meta.ai/v1",
+      "context_window": 1000000,
+      "api_backend": "responses",
+      "provider": "meta",
+      "env_key": "META_API_KEY",
+      "tool_mode": "direct",
+      "supported_in_api": true,
+      "reasoning_effort": "medium",
+      "supports_reasoning_effort": true,
+      "reasoning_efforts": [
+        { "value": "low", "description": "Faster responses with lighter reasoning" },
+        { "value": "medium", "description": "Balanced reasoning depth for everyday tasks", "default": true },
+        { "value": "high", "description": "Greater reasoning depth for complex problems" },
+        { "value": "xhigh", "description": "Extra-high reasoning depth for difficult tasks" }
+      ],
+      "supports_backend_search": true
+    },
+    {
+      "id": "meta:muse-spark-1.2-contributor",
+      "model": "muse-spark-1.2-contributor",
+      "name": "Muse Spark 1.2 Contributor",
+      "description": "Meta's contributor-tuned Muse Spark 1.2 model",
+      "base_url": "https://api.meta.ai/v1",
+      "context_window": 1000000,
+      "api_backend": "responses",
+      "provider": "meta",
+      "env_key": "META_API_KEY",
+      "tool_mode": "direct",
+      "supported_in_api": true,
+      "reasoning_effort": "medium",
+      "supports_reasoning_effort": true,
+      "reasoning_efforts": [
+        { "value": "low", "description": "Faster responses with lighter reasoning" },
+        { "value": "medium", "description": "Balanced reasoning depth for everyday tasks", "default": true },
+        { "value": "high", "description": "Greater reasoning depth for complex problems" },
+        { "value": "xhigh", "description": "Extra-high reasoning depth for difficult tasks" }
+      ],
+      "supports_backend_search": true
+    },
+    {
       "model": "gpt-5.6-sol",
       "name": "GPT-5.6 Sol",
       "description": "Latest frontier agentic coding model",

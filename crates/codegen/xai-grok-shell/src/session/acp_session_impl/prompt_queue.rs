@@ -13,7 +13,8 @@ impl SessionActor {
     ///
     /// `send_now` (or a user prompt arriving during an interruptible wait)
     /// inserts the prompt to run next. Returns `true` when the caller must
-    /// cancel the running turn.
+    /// cancel the running turn — never while a goal loop or an `agent_swarm`
+    /// cohort owns the turn, since both would lose live work.
     pub(super) async fn queue_input(
         &self,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -218,13 +219,18 @@ impl SessionActor {
             .goal_loop_active_gate
             .load(std::sync::atomic::Ordering::Relaxed);
         let blocked_in_wait = self.tool_context.blocking_wait_depth.depth() > 0;
+        // An `agent_swarm` cohort is parked here. Aborting the turn cancels
+        // every live member, so the prompt is promoted to run next but the turn
+        // is left alone — the same promote-without-cancel shape goal turns use.
+        // Mid-run feedback to the orchestrator goes through `x.ai/interject`.
+        let orchestrating = self.tool_context.blocking_wait_depth.orchestration_depth() > 0;
         let held_user_queue = state.pending_inputs.iter().any(|queued| {
             !queued.origin.is_synthetic()
                 && Some(queued.prompt_id.as_str()) != running_front_id.as_deref()
         });
         let auto_send_now = turn_running && blocked_in_wait && !held_user_queue;
         let send_now = !item.origin.is_synthetic() && (send_now || auto_send_now);
-        let cancel_running_turn = send_now && turn_running && !goal_active;
+        let cancel_running_turn = send_now && turn_running && !goal_active && !orchestrating;
         if send_now {
             item.send_now = true;
             // Insert right behind the running front (never displace it —
@@ -259,6 +265,7 @@ impl SessionActor {
             owner = %log_owner,
             send_now,
             cancel_running_turn,
+            orchestrating,
             new_depth = state.pending_inputs.len(),
             running_task_present = state.running_task.is_some(),
             session = self.session_info.id.0.as_ref(),

@@ -357,6 +357,7 @@ pub enum WebSearchSourceTarget {
     KimiCode,
     Fireworks,
     DeepSeek,
+    Meta,
     Wafer,
     OpenCodeGo,
 }
@@ -377,6 +378,7 @@ impl WebSearchSourceTarget {
             },
             ModelProvider::Fireworks => Self::Fireworks,
             ModelProvider::DeepSeek => Self::DeepSeek,
+            ModelProvider::Meta => Self::Meta,
             ModelProvider::Wafer => Self::Wafer,
             ModelProvider::OpenCodeGo => Self::OpenCodeGo,
         }
@@ -395,6 +397,7 @@ pub struct WebSearchSourceConfig {
     pub kimi_code: Option<WebSearchSource>,
     pub fireworks: Option<WebSearchSource>,
     pub deepseek: Option<WebSearchSource>,
+    pub meta: Option<WebSearchSource>,
     pub wafer: Option<WebSearchSource>,
     pub opencode_go: Option<WebSearchSource>,
 }
@@ -409,16 +412,17 @@ impl WebSearchSourceConfig {
             WebSearchSourceTarget::KimiCode => self.kimi_code,
             WebSearchSourceTarget::Fireworks => self.fireworks,
             WebSearchSourceTarget::DeepSeek => self.deepseek,
+            WebSearchSourceTarget::Meta => self.meta,
             WebSearchSourceTarget::Wafer => self.wafer,
             WebSearchSourceTarget::OpenCodeGo => self.opencode_go,
         }
     }
 
-    /// The default source for `target` when nothing is selected: Codex keeps
-    /// its native search, everything else uses xAI web search.
+    /// The default source for `target` when nothing is selected: Codex and
+    /// Meta keep native search, while other providers use xAI web search.
     pub fn default_for(target: WebSearchSourceTarget) -> WebSearchSource {
         match target {
-            WebSearchSourceTarget::Codex => WebSearchSource::Native,
+            WebSearchSourceTarget::Codex | WebSearchSourceTarget::Meta => WebSearchSource::Native,
             WebSearchSourceTarget::Xai
             | WebSearchSourceTarget::KimiPlatform
             | WebSearchSourceTarget::KimiCode
@@ -444,6 +448,7 @@ impl WebSearchSourceConfig {
             WebSearchSourceTarget::KimiCode => self.kimi_code = source,
             WebSearchSourceTarget::Fireworks => self.fireworks = source,
             WebSearchSourceTarget::DeepSeek => self.deepseek = source,
+            WebSearchSourceTarget::Meta => self.meta = source,
             WebSearchSourceTarget::Wafer => self.wafer = source,
             WebSearchSourceTarget::OpenCodeGo => self.opencode_go = source,
         }
@@ -532,6 +537,7 @@ impl WebSearchCandidates {
                     WebSearchSource::Native
                 }
             }
+            WebSearchSourceTarget::Meta => WebSearchSource::Native,
             // The legacy Perplexity toggle is a Kimi-only alias; Fireworks
             // requires an explicit Perplexity selection.
             WebSearchSourceTarget::Xai
@@ -564,6 +570,7 @@ impl WebSearchCandidates {
                 // Native hosted search is a server-side declaration, not a
                 // client tool. Providers without it still resolve disabled.
                 ModelProvider::Codex
+                | ModelProvider::Meta
                 | ModelProvider::Kimi
                 | ModelProvider::Fireworks
                 | ModelProvider::DeepSeek
@@ -598,6 +605,7 @@ impl WebSearchCandidates {
             provider,
             xai_grok_sampling_types::ModelProvider::Codex
                 | xai_grok_sampling_types::ModelProvider::DeepSeek
+                | xai_grok_sampling_types::ModelProvider::Meta
         ) && !matches!(
             self.resolved_config_for(provider),
             xai_grok_tools::implementations::web_search::WebSearchConfig::Disabled

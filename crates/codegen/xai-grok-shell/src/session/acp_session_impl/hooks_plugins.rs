@@ -953,11 +953,7 @@ impl SessionActor {
                 });
             }
             for name in &diff.removed {
-                let prefix = format!(
-                    "{}{}",
-                    name,
-                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                );
+                let prefix = crate::session::mcp_servers::mcp_tool_name_prefix(name);
                 let removed_count = self
                     .agent
                     .borrow()

@@ -148,6 +148,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         Some(crate::app::app_view::PrimaryProvider::Fireworks)
     } else if app.pending_deepseek_rebind_agents.contains(&parent_id) {
         Some(crate::app::app_view::PrimaryProvider::DeepSeek)
+    } else if app.pending_meta_rebind_agents.contains(&parent_id) {
+        Some(crate::app::app_view::PrimaryProvider::Meta)
     } else if app.pending_opencode_go_rebind_agents.contains(&parent_id) {
         Some(crate::app::app_view::PrimaryProvider::OpenCodeGo)
     } else if app.pending_wafer_rebind_agents.contains(&parent_id) {
@@ -691,6 +693,26 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 }
                 entry.invalidate_cache();
             }
+            true
+        }
+        XaiSessionUpdate::SubagentMessage {
+            from_agent_id,
+            to_agent_id,
+            kind,
+            body,
+            status,
+            ..
+        } => {
+            let preview = if body.chars().count() > 500 {
+                format!("{}…", body.chars().take(500).collect::<String>())
+            } else {
+                body
+            };
+            agent.scrollback.push_block(RenderBlock::System(
+                crate::scrollback::blocks::SystemMessageBlock::new(format!(
+                    "Agent {kind} ({status}) · {from_agent_id} → {to_agent_id}\n{preview}"
+                )),
+            ));
             true
         }
         XaiSessionUpdate::SubagentFinished {
@@ -1251,6 +1273,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         }
         Some(crate::app::app_view::PrimaryProvider::DeepSeek) => {
             app.cancel_pending_deepseek_rebind(parent_id);
+        }
+        Some(crate::app::app_view::PrimaryProvider::Meta) => {
+            app.cancel_pending_meta_rebind(parent_id);
         }
         Some(crate::app::app_view::PrimaryProvider::OpenCodeGo) => {
             app.cancel_pending_opencode_go_rebind(parent_id);

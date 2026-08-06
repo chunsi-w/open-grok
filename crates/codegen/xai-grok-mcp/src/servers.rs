@@ -44,6 +44,8 @@ use xai_grok_tools::util::{ProcessGroup, ProcessScope};
 /// for callers that historically imported it from this module.
 pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
 
+const ENCODED_MCP_SERVER_PREFIX: &str = "_mcp_";
+
 /// Reqwest 0.13 adapter over `xai_grok_extra_ca::extra_root_ders` (DER is version-neutral).
 fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     for der in xai_grok_extra_ca::extra_root_ders() {
@@ -95,6 +97,61 @@ pub fn validate_tool_name(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn encode_mcp_server_namespace(server_name: &str) -> String {
+    if !server_name.starts_with(ENCODED_MCP_SERVER_PREFIX)
+        && !server_name.contains(MCP_TOOL_NAME_DELIMITER)
+        && !server_name.ends_with('_')
+        && validate_tool_name(server_name).is_ok()
+    {
+        return server_name.to_string();
+    }
+
+    let mut encoded =
+        String::with_capacity(ENCODED_MCP_SERVER_PREFIX.len() + server_name.len() * 2);
+    encoded.push_str(ENCODED_MCP_SERVER_PREFIX);
+    for byte in server_name.as_bytes() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn decode_mcp_server_namespace(namespace: &str) -> String {
+    let Some(hex) = namespace.strip_prefix(ENCODED_MCP_SERVER_PREFIX) else {
+        return namespace.to_string();
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return namespace.to_string();
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let Ok(pair) = std::str::from_utf8(pair) else {
+            return namespace.to_string();
+        };
+        let Ok(byte) = u8::from_str_radix(pair, 16) else {
+            return namespace.to_string();
+        };
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| namespace.to_string())
+}
+
+pub fn mcp_tool_name_prefix(server_name: &str) -> String {
+    format!(
+        "{}{}",
+        encode_mcp_server_namespace(server_name),
+        MCP_TOOL_NAME_DELIMITER
+    )
+}
+
+pub fn qualified_mcp_tool_name(server_name: &str, tool_name: &str) -> Option<String> {
+    let qualified_name = format!("{}{}", mcp_tool_name_prefix(server_name), tool_name);
+    parse_mcp_qualified_name(&qualified_name)?;
+    validate_tool_name(&qualified_name).ok()?;
+    Some(qualified_name)
 }
 
 /// Sanitize an MCP server or tool name into a single safe path segment
@@ -645,7 +702,7 @@ impl McpState {
             self.owned_clients.remove(name);
             self.auth_required.remove(name);
             self.init_progress.mark_handshake_complete(name);
-            let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
+            let prefix = mcp_tool_name_prefix(name);
             self.mcp_tool_meta.retain(|k, _| !k.starts_with(&prefix));
             self.disabled_tool_registrations
                 .retain(|k, _| !k.starts_with(&prefix));
@@ -1082,7 +1139,8 @@ pub fn parse_mcp_qualified_name(name: &str) -> Option<(xai_tool_protocol::ToolId
 
 /// Parse an MCP tool name in `server__tool` format into owned segments.
 pub fn parse_mcp_tool_name(name: &str) -> Option<(String, String)> {
-    parse_mcp_qualified_name(name).map(|(_, server, tool)| (server.to_owned(), tool.to_owned()))
+    parse_mcp_qualified_name(name)
+        .map(|(_, server, tool)| (decode_mcp_server_namespace(server), tool.to_owned()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1255,6 +1313,7 @@ pub struct McpTool {
 ///   `x.ai/mcp/call`.
 pub struct McpToolRegistration {
     pub name: String,
+    pub tool_name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
     pub tool: McpErasedTool,
@@ -1289,30 +1348,16 @@ impl McpTool {
     /// and skipped; the upstream connector must provide non-empty `server` and
     /// `tool` segments separated by exactly one `__` boundary.
     pub fn into_registration(self) -> Option<McpToolRegistration> {
-        let qualified_name = format!(
-            "{}{}{}",
-            self.server_name, MCP_TOOL_NAME_DELIMITER, self.name
-        );
-
-        if parse_mcp_qualified_name(&qualified_name).is_none() {
+        let Some(qualified_name) = qualified_mcp_tool_name(&self.server_name, &self.name) else {
             tracing::error!(
                 server = %self.server_name,
                 tool = %self.name,
-                qualified = %qualified_name,
-                "Skipping MCP tool with invalid or ambiguous qualified name"
+                "Skipping MCP tool whose provider-safe qualified name cannot be represented"
             );
             return None;
-        }
-        if let Err(reason) = validate_tool_name(&qualified_name) {
-            tracing::error!(
-                tool_name = %qualified_name,
-                server = %self.server_name,
-                reason = %reason,
-                "Skipping MCP tool with invalid name"
-            );
-            return None;
-        }
+        };
 
+        let tool_name = self.name.clone();
         let description = self.description.clone();
         let input_schema = self.schema.clone();
         let meta = self.meta.clone();
@@ -1327,6 +1372,7 @@ impl McpTool {
 
         Some(McpToolRegistration {
             name: qualified_name,
+            tool_name,
             description,
             input_schema,
             tool: McpErasedTool { tool: self },
@@ -1374,10 +1420,8 @@ impl xai_tool_runtime::Tool for McpErasedTool {
     fn id(&self) -> xai_tool_protocol::ToolId {
         // Use the qualified name (server__tool) so that two MCP servers
         // exposing the same raw tool name get distinct LocalRegistry entries.
-        let qualified = format!(
-            "{}{}{}",
-            self.tool.server_name, MCP_TOOL_NAME_DELIMITER, self.tool.name
-        );
+        let qualified = qualified_mcp_tool_name(&self.tool.server_name, &self.tool.name)
+            .unwrap_or_else(|| "mcp_tool".to_string());
         xai_tool_protocol::ToolId::new(&qualified)
             .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("mcp_tool").expect("valid"))
     }
@@ -1409,7 +1453,8 @@ impl xai_tool_runtime::Tool for McpErasedTool {
         let server = &self.tool.server_name;
         let tool = &self.tool.name;
         let tool_timeout = client.tool_timeout_for(tool);
-        let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
+        let qualified_name = qualified_mcp_tool_name(server, tool)
+            .unwrap_or_else(|| format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool));
         event_writer.emit(xai_file_utils::events::Event::McpToolCallStarted {
             server_name: server.clone(),
             tool_name: tool.clone(),
@@ -3936,13 +3981,7 @@ impl McpClient {
         // Warn about tool_timeouts keys that don't match any discovered tool.
         // This catches typos like `creat_issue` instead of `create_issue`.
         if !self.tool_timeouts.is_empty() {
-            // Registration names are qualified ("server__tool"); tool_timeouts
-            // keys are raw tool names. Strip the server prefix for comparison.
-            let prefix = format!("{}{}", self.server_name, MCP_TOOL_NAME_DELIMITER);
-            let raw_names: Vec<&str> = registrations
-                .iter()
-                .map(|r| r.name.strip_prefix(prefix.as_str()).unwrap_or(&r.name))
-                .collect();
+            let raw_names: Vec<&str> = registrations.iter().map(|r| r.tool_name.as_str()).collect();
             let discovered: std::collections::HashSet<&str> = raw_names.iter().copied().collect();
             for key in self.tool_timeouts.keys() {
                 if !discovered.contains(key.as_str()) {
@@ -5932,11 +5971,10 @@ mod tests {
             .into_registration()
             .expect("should register");
         assert_eq!(registration.name, "linear__list_issues");
+        assert_eq!(registration.tool_name, "list_issues");
 
         for (server, tool) in [
-            ("server__part", "tool"),
             ("server", "tool__part"),
-            ("foo_", "bar"),
             ("foo", "_bar"),
             ("foo_", "_bar"),
             ("", "tool"),
@@ -5950,12 +5988,28 @@ mod tests {
     }
 
     #[test]
-    fn into_registration_preserves_provider_name_policy() {
-        for qualified in ["123__lookup", "server:scope__tool"] {
-            assert!(parse_mcp_qualified_name(qualified).is_some());
-            let (server, tool) = qualified.split_once("__").unwrap();
-            assert!(make_mcp_tool(server, tool).into_registration().is_none());
+    fn into_registration_encodes_provider_invalid_server_names() {
+        for (server, tool) in [
+            ("DS Dev", "inspect_turn"),
+            ("123", "lookup"),
+            ("server:scope", "tool"),
+            ("server__part", "tool"),
+            ("foo_", "bar"),
+        ] {
+            let registration = make_mcp_tool(server, tool)
+                .into_registration()
+                .expect("server name should be encoded");
+            assert!(validate_tool_name(&registration.name).is_ok());
+            assert_eq!(
+                parse_mcp_tool_name(&registration.name),
+                Some((server.to_string(), tool.to_string()))
+            );
         }
+
+        let registration = make_mcp_tool("DS Dev", "inspect_turn")
+            .into_registration()
+            .expect("DS Dev should register");
+        assert_eq!(registration.name, "_mcp_445320446576__inspect_turn");
 
         let server_61 = format!("a{}", "b".repeat(60));
         let server_62 = format!("a{}", "b".repeat(61));
@@ -5967,6 +6021,19 @@ mod tests {
         assert!(parse_mcp_qualified_name(&invalid_65).is_some());
         assert!(make_mcp_tool(&server_61, "b").into_registration().is_some());
         assert!(make_mcp_tool(&server_62, "b").into_registration().is_none());
+    }
+
+    #[test]
+    fn reserved_encoded_prefix_round_trips_without_alias_collision() {
+        let server = "_mcp_445320446576";
+        let registration = make_mcp_tool(server, "inspect_turn")
+            .into_registration()
+            .expect("reserved prefix should be escaped");
+        assert_ne!(registration.name, "_mcp_445320446576__inspect_turn");
+        assert_eq!(
+            parse_mcp_tool_name(&registration.name),
+            Some((server.to_string(), "inspect_turn".to_string()))
+        );
     }
 
     // ── is_retriable_transport_error tests ───────────────────────────

@@ -17,11 +17,11 @@ use crate::{
         MAX_SUBAGENT_DEPTH,
         backend::{SubagentBackend, SubagentBackendResource},
         types::{
-            CurrentPromptIdResource, ModelOverrideProvenance, SWARM_RATE_LIMIT_RETRY_BASE_MS,
-            SessionIdResource, SubagentDepthCounter, SubagentForegroundWait,
-            SubagentRateLimitDecision, SubagentRequest, SubagentResult, SubagentRuntimeOverrides,
-            SubagentStatusEvent, SubagentValidateTypeOutcome, SwarmMemberMeta, TaskModelValidator,
-            swarm_rate_limit_backoff,
+            CurrentPromptIdResource, ForegroundWaitKind, ModelOverrideProvenance,
+            SWARM_RATE_LIMIT_RETRY_BASE_MS, SessionIdResource, SubagentDepthCounter,
+            SubagentForegroundWait, SubagentRateLimitDecision, SubagentRequest, SubagentResult,
+            SubagentRuntimeOverrides, SubagentStatusEvent, SubagentValidateTypeOutcome,
+            SwarmMemberMeta, TaskModelValidator, swarm_rate_limit_backoff,
         },
     },
     types::{
@@ -374,7 +374,10 @@ impl xai_tool_runtime::Tool for AgentSwarmTool {
             }
         }
 
-        let _foreground_wait = foreground_wait.map(|wait| wait.enter());
+        // Orchestration, not interruptible: a prompt arriving mid-swarm must not
+        // abort this turn, because every member is cancelled with it.
+        let _foreground_wait =
+            foreground_wait.map(|wait| wait.enter_kind(ForegroundWaitKind::Orchestration));
         let swarm_cancellation = CancellationToken::new();
         let cancellation_forwarder = tool_cancellation.map(|tool_cancellation| {
             let swarm_cancellation = swarm_cancellation.clone();

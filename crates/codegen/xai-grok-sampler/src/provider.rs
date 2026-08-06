@@ -166,13 +166,17 @@ pub trait ProviderAdapter: std::fmt::Debug + Send + Sync {
             Some(ResponsesDialect::DeepSeek) => {
                 patch_deepseek_responses_request(request_body, policy)
             }
+            Some(ResponsesDialect::Meta) => patch_meta_responses_request(request_body),
         }
     }
 
     /// Return the provider-owned cache key derived from stable request state.
     fn prompt_cache_key(&self, session_id: Option<&str>) -> Option<String> {
         match self.profile().responses_dialect() {
-            None | Some(ResponsesDialect::Xai | ResponsesDialect::DeepSeek) => None,
+            None
+            | Some(ResponsesDialect::Xai | ResponsesDialect::DeepSeek | ResponsesDialect::Meta) => {
+                None
+            }
             Some(ResponsesDialect::Codex) => session_id
                 .filter(|session_id| !session_id.is_empty())
                 .map(str::to_owned),
@@ -249,7 +253,9 @@ pub trait ProviderAdapter: std::fmt::Debug + Send + Sync {
         }
 
         match self.profile().responses_dialect() {
-            None | Some(ResponsesDialect::Xai | ResponsesDialect::DeepSeek) => {}
+            None
+            | Some(ResponsesDialect::Xai | ResponsesDialect::DeepSeek | ResponsesDialect::Meta) => {
+            }
             Some(ResponsesDialect::Codex) => {
                 let value = parsed
                     .as_ref()
@@ -279,9 +285,12 @@ pub trait ProviderAdapter: std::fmt::Debug + Send + Sync {
     fn normalizes_response_events(&self) -> bool {
         match self.profile().responses_dialect() {
             None => false,
-            Some(ResponsesDialect::Xai | ResponsesDialect::Codex | ResponsesDialect::DeepSeek) => {
-                true
-            }
+            Some(
+                ResponsesDialect::Xai
+                | ResponsesDialect::Codex
+                | ResponsesDialect::DeepSeek
+                | ResponsesDialect::Meta,
+            ) => true,
         }
     }
 
@@ -372,6 +381,15 @@ impl ProviderAdapter for DeepSeekProvider {
         for message in &mut request.messages {
             message.model_id = None;
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct MetaProvider;
+
+impl ProviderAdapter for MetaProvider {
+    fn provider(&self) -> ModelProvider {
+        ModelProvider::Meta
     }
 }
 
@@ -508,11 +526,12 @@ static CODEX_PROVIDER: CodexProvider = CodexProvider;
 static KIMI_PROVIDER: KimiProvider = KimiProvider;
 static FIREWORKS_PROVIDER: FireworksProvider = FireworksProvider;
 static DEEPSEEK_PROVIDER: DeepSeekProvider = DeepSeekProvider;
+static META_PROVIDER: MetaProvider = MetaProvider;
 static OPEN_CODE_GO_PROVIDER: OpenCodeGoProvider = OpenCodeGoProvider;
 static WAFER_PROVIDER: WaferProvider = WaferProvider;
 
 /// Complete registry for the built-in providers.
-pub static PROVIDER_REGISTRY: [ProviderRegistration; 7] = [
+pub static PROVIDER_REGISTRY: [ProviderRegistration; 8] = [
     ProviderRegistration {
         provider: ModelProvider::Xai,
         adapter: &XAI_PROVIDER,
@@ -534,6 +553,10 @@ pub static PROVIDER_REGISTRY: [ProviderRegistration; 7] = [
         adapter: &DEEPSEEK_PROVIDER,
     },
     ProviderRegistration {
+        provider: ModelProvider::Meta,
+        adapter: &META_PROVIDER,
+    },
+    ProviderRegistration {
         provider: ModelProvider::OpenCodeGo,
         adapter: &OPEN_CODE_GO_PROVIDER,
     },
@@ -553,8 +576,9 @@ pub fn provider_adapter(provider: ModelProvider) -> &'static dyn ProviderAdapter
         ModelProvider::Kimi => PROVIDER_REGISTRY[2].adapter,
         ModelProvider::Fireworks => PROVIDER_REGISTRY[3].adapter,
         ModelProvider::DeepSeek => PROVIDER_REGISTRY[4].adapter,
-        ModelProvider::OpenCodeGo => PROVIDER_REGISTRY[5].adapter,
-        ModelProvider::Wafer => PROVIDER_REGISTRY[6].adapter,
+        ModelProvider::Meta => PROVIDER_REGISTRY[5].adapter,
+        ModelProvider::OpenCodeGo => PROVIDER_REGISTRY[6].adapter,
+        ModelProvider::Wafer => PROVIDER_REGISTRY[7].adapter,
     }
 }
 
@@ -681,6 +705,21 @@ fn patch_deepseek_responses_request(request_body: &mut Value, policy: ResponsesR
         .is_some_and(serde_json::Map::is_empty)
     {
         body.remove("reasoning");
+    }
+}
+
+fn patch_meta_responses_request(request_body: &mut Value) {
+    request_body.as_object_mut().map(|body| {
+        body.remove("include");
+        body.remove("prompt_cache_key");
+        body.remove("prompt_cache_retention");
+        body.remove("store");
+    });
+    if let Some(reasoning) = request_body
+        .get_mut("reasoning")
+        .and_then(Value::as_object_mut)
+    {
+        reasoning.remove("summary");
     }
 }
 
@@ -824,6 +863,7 @@ mod tests {
             ModelProvider::Kimi,
             ModelProvider::Fireworks,
             ModelProvider::DeepSeek,
+            ModelProvider::Meta,
             ModelProvider::OpenCodeGo,
             ModelProvider::Wafer,
         ];
@@ -849,6 +889,7 @@ mod tests {
             ModelProvider::Kimi,
             ModelProvider::Fireworks,
             ModelProvider::DeepSeek,
+            ModelProvider::Meta,
             ModelProvider::OpenCodeGo,
             ModelProvider::Wafer,
         ] {
@@ -873,6 +914,11 @@ mod tests {
                 ModelProvider::DeepSeek => {
                     assert_eq!(request["input"], original["input"]);
                     assert_eq!(request["reasoning"]["effort"], "max");
+                    assert!(request["reasoning"].get("summary").is_none());
+                }
+                ModelProvider::Meta => {
+                    assert_eq!(request["input"], original["input"]);
+                    assert_eq!(request["reasoning"]["effort"], "xhigh");
                     assert!(request["reasoning"].get("summary").is_none());
                 }
                 _ => assert_eq!(request, original),
@@ -900,6 +946,7 @@ mod tests {
         let kimi = provider_adapter(ModelProvider::Kimi);
         let fireworks = provider_adapter(ModelProvider::Fireworks);
         let deepseek = provider_adapter(ModelProvider::DeepSeek);
+        let meta = provider_adapter(ModelProvider::Meta);
         assert_eq!(xai.prompt_cache_key(Some("session")), None);
         assert_eq!(
             codex.prompt_cache_key(Some("session")),
@@ -937,6 +984,13 @@ mod tests {
         );
         assert!(deepseek.validate_backend(&ApiBackend::Responses).is_ok());
         assert!(deepseek.validate_backend(&ApiBackend::Messages).is_err());
+        assert_eq!(meta.prompt_cache_key(Some("session")), None);
+        assert!(!meta.supports_turn_state(&ApiBackend::Responses));
+        assert!(!meta.sends_doom_loop_opt_in());
+        assert!(meta.normalizes_response_events());
+        assert!(meta.validate_backend(&ApiBackend::ChatCompletions).is_err());
+        assert!(meta.validate_backend(&ApiBackend::Responses).is_ok());
+        assert!(meta.validate_backend(&ApiBackend::Messages).is_err());
 
         let wafer = provider_adapter(ModelProvider::Wafer);
         assert_eq!(wafer.prompt_cache_key(Some("session")), None);
@@ -978,6 +1032,28 @@ mod tests {
             assert!(request["reasoning"].get("summary").is_none());
             assert!(request.get("include").is_none());
             assert!(request.get("prompt_cache_key").is_none());
+            assert!(request.get("store").is_none());
+        }
+    }
+
+    #[test]
+    fn meta_responses_preserves_supported_effort_and_drops_unsupported_state() {
+        for effort in ["low", "medium", "high", "xhigh"] {
+            let mut request = serde_json::json!({
+                "input": [],
+                "include": ["reasoning.encrypted_content"],
+                "prompt_cache_key": "must-not-send",
+                "prompt_cache_retention": "24h",
+                "reasoning": {"effort": effort, "summary": "concise"},
+                "store": true,
+            });
+            provider_adapter(ModelProvider::Meta)
+                .patch_responses_request(&mut request, ResponsesRequestPolicy::default());
+            assert_eq!(request["reasoning"]["effort"], effort);
+            assert!(request["reasoning"].get("summary").is_none());
+            assert!(request.get("include").is_none());
+            assert!(request.get("prompt_cache_key").is_none());
+            assert!(request.get("prompt_cache_retention").is_none());
             assert!(request.get("store").is_none());
         }
     }

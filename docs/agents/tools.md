@@ -292,7 +292,7 @@ Paths under `xai-grok-tools/src/implementations/` unless noted.
 | Ask user | `ask_user_question` | `grok_build/ask_user_question/` | Reverse RPC to UI; timeout config |
 | Goals | `update_goal` | `grok_build/update_goal/` | Goal tracker in shell session |
 | Todo | `todo` / OpenCode `todowrite` | `grok_build/todo/`, `opencode/todowrite/` | Persisted plan state |
-| Image / video | `image_gen`, `image_edit`, image/ref → video | `grok_build/image_*`, `video_gen/` | Imagine APIs; config + API key provider |
+| Image / video | `image_gen`, `image_edit`, image/ref → video | `grok_build/image_*`, `video_gen/` | Settings selects Grok Imagine or OpenAI Images for image tools; video remains xAI-only |
 | LSP | `lsp` | `grok_build/lsp/` + `implementations/lsp/` | Shared handle from shell |
 | Memory | `memory_search`, `memory_get` | `memory/` | Needs `memory_backend` in session context |
 | Skills | skill invoke + discovery | `skills/`, `opencode/skill/` | Discovery reminder; types in `skills/types.rs` |

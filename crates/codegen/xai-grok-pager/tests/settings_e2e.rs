@@ -16,8 +16,8 @@ use xai_grok_pager::settings::{
     SettingValue, SettingsRegistry,
 };
 use xai_grok_pager::views::settings_modal::{
-    handle_settings_key, handle_settings_mouse, RowEntry, SettingsEntryPoint, SettingsKeyOutcome,
-    SettingsModalMode, SettingsModalState,
+    RowEntry, SettingsEntryPoint, SettingsKeyOutcome, SettingsModalMode, SettingsModalState,
+    handle_settings_key, handle_settings_mouse,
 };
 use xai_grok_shell::agent::config::UiConfig;
 
@@ -40,6 +40,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "vim_mode",
     "remember_tool_approvals",
     "code_mode",
+    "image_generation_provider",
     "toolset.ask_user_question.timeout_enabled",
     "keep_text_selection",
     "theme",
@@ -554,6 +555,57 @@ fn code_mode_registry_contract_is_restart_required_and_direct_by_default() {
 }
 
 #[test]
+fn enter_on_image_generation_provider_commits_openai() {
+    let mut state = make_state();
+    navigate_to(&mut state, "image_generation_provider");
+    assert!(matches!(
+        handle_settings_key(&mut state, &press(KeyCode::Enter)),
+        SettingsKeyOutcome::Changed
+    ));
+    assert!(matches!(
+        state.mode(),
+        SettingsModalMode::PickingEnum {
+            key: "image_generation_provider",
+            choices_idx: 0,
+            supports_preview: false,
+            original_value: SettingValue::Enum("grok"),
+        }
+    ));
+    assert!(matches!(
+        handle_settings_key(&mut state, &press(KeyCode::Down)),
+        SettingsKeyOutcome::Changed
+    ));
+    assert!(matches!(
+        handle_settings_key(&mut state, &press(KeyCode::Enter)),
+        SettingsKeyOutcome::Action(Action::SetImageGenerationProvider(
+            xai_grok_shell::agent::config::ImageGenerationProvider::OpenAi
+        ))
+    ));
+}
+
+#[test]
+fn image_generation_provider_registry_contract() {
+    let registry = SettingsRegistry::defaults();
+    let meta = registry
+        .find("image_generation_provider")
+        .expect("image generation provider must be registered");
+    assert_eq!(meta.label, "Image generation");
+    assert_eq!(meta.category, SettingCategory::Models);
+    assert_eq!(meta.owner, SettingOwner::Shell);
+    assert!(meta.restart_required);
+    assert!(matches!(
+        meta.kind,
+        SettingKind::Enum {
+            default: "grok",
+            supports_preview: false,
+            ..
+        }
+    ));
+    assert!(meta.description.contains("OpenAI Images"));
+    assert!(meta.description.contains("login --codex"));
+}
+
+#[test]
 fn enter_on_kimi_service_opens_picker_and_commits_code() {
     let mut s = make_state();
     navigate_to(&mut s, "kimi_api_endpoint");
@@ -1019,6 +1071,29 @@ fn mouse_click_on_code_mode_indicator_opens_picker_in_one_click() {
         s.mode(),
         SettingsModalMode::PickingEnum {
             key: "code_mode",
+            choices_idx: 0,
+            supports_preview: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn mouse_click_on_image_generation_provider_opens_picker() {
+    let mut state = make_state();
+    synth_rects(&mut state);
+    let row_y = row_idx_for(&state, "image_generation_provider") as u16;
+    let outcome = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(matches!(
+        state.mode(),
+        SettingsModalMode::PickingEnum {
+            key: "image_generation_provider",
             choices_idx: 0,
             supports_preview: false,
             ..
@@ -2251,6 +2326,7 @@ fn registry_kind_membership_through_pr_14() {
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
+            "image_generation_provider",
             "keep_text_selection",
             "kimi_api_endpoint",
             "permission_mode",
@@ -2346,6 +2422,7 @@ fn enum_settings_membership_through_pr_14() {
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
+            "image_generation_provider",
             "keep_text_selection",
             "kimi_api_endpoint",
             "permission_mode",
@@ -2370,7 +2447,7 @@ fn enum_settings_membership_through_pr_14() {
 /// `UiConfig::default()` with independently hard-coded expectations.
 #[test]
 fn defaults_round_trip_through_registry() {
-    use xai_grok_pager::settings::{current_value_for, SettingValue};
+    use xai_grok_pager::settings::{SettingValue, current_value_for};
     let reg = SettingsRegistry::defaults();
     let ui = UiConfig::default();
     let pager = PagerLocalSnapshot::default();
@@ -2408,6 +2485,7 @@ fn defaults_round_trip_through_registry() {
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(false),
             "code_mode" => SettingValue::Enum("direct"),
+            "image_generation_provider" => SettingValue::Enum("grok"),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
             "theme" => SettingValue::Enum("groknight"),
@@ -4649,7 +4727,7 @@ fn reset_confirm_overlay_renders_prompt_with_setting_label_and_default() {
 #[test]
 fn reset_confirm_prompt_helper_builds_well_formed_string_for_every_setting() {
     use xai_grok_pager::settings::{PagerLocalSnapshot, SettingsRegistry};
-    use xai_grok_pager::views::modal::{reset_confirm_prompt, ActiveModal, ModalConfirmation};
+    use xai_grok_pager::views::modal::{ActiveModal, ModalConfirmation, reset_confirm_prompt};
     use xai_grok_shell::agent::config::UiConfig;
     let reg = SettingsRegistry::defaults();
     for meta in reg.all() {

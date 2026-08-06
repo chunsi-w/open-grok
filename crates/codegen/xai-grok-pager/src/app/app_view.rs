@@ -411,6 +411,7 @@ pub enum PrimaryProvider {
     Kimi,
     Fireworks,
     DeepSeek,
+    Meta,
     OpenCodeGo,
     Wafer,
 }
@@ -437,6 +438,11 @@ impl PrimaryProvider {
             || provider.eq_ignore_ascii_case("deepseek-api")
         {
             Some(Self::DeepSeek)
+        } else if provider.eq_ignore_ascii_case("meta")
+            || provider.eq_ignore_ascii_case("meta_ai")
+            || provider.eq_ignore_ascii_case("meta-api")
+        {
+            Some(Self::Meta)
         } else if provider.eq_ignore_ascii_case("opencode_go")
             || provider.eq_ignore_ascii_case("opencode-go")
         {
@@ -641,7 +647,8 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
 ///
 /// Current set:
 /// - `usage` — coding credit / billing UI (alias: `/cost`)
-/// - `imagine` — image generation entry point
+/// - `imagine` — Grok Imagine entry point (not restricted when the persisted
+///   OpenAI Images route is active)
 /// - `imagine-video` — video generation entry point
 /// - `voice` — voice dictation entry point (the Ctrl+Space / F8 keybinding is
 ///   gated separately in [`crate::app::dispatch::voice`], since it bypasses the
@@ -745,6 +752,9 @@ pub struct AppView {
     pub(crate) deepseek_operation_generation: u64,
     pub(crate) deepseek_runtime_update_pending: bool,
     pub(crate) pending_deepseek_rebind_agents: std::collections::HashSet<AgentId>,
+    pub(crate) meta_operation_generation: u64,
+    pub(crate) meta_runtime_update_pending: bool,
+    pub(crate) pending_meta_rebind_agents: std::collections::HashSet<AgentId>,
     pub(crate) opencode_go_operation_generation: u64,
     pub(crate) opencode_go_runtime_update_pending: bool,
     pub(crate) pending_opencode_go_rebind_agents: std::collections::HashSet<AgentId>,
@@ -1477,6 +1487,17 @@ impl AppView {
         }
     }
 
+    pub(crate) fn cancel_pending_meta_rebind(&mut self, agent_id: AgentId) -> bool {
+        let removed = self.pending_meta_rebind_agents.remove(&agent_id);
+        if let Some(agent) = self.agents.get_mut(&agent_id) {
+            let was_pending = agent.session.provider_rebind_pending;
+            agent.session.provider_rebind_pending = false;
+            removed || was_pending
+        } else {
+            removed
+        }
+    }
+
     pub(crate) fn cancel_pending_opencode_go_rebind(&mut self, agent_id: AgentId) -> bool {
         let removed = self.pending_opencode_go_rebind_agents.remove(&agent_id);
         if let Some(agent) = self.agents.get_mut(&agent_id) {
@@ -1521,6 +1542,7 @@ impl AppView {
             | PrimaryProvider::Kimi
             | PrimaryProvider::Fireworks
             | PrimaryProvider::DeepSeek
+            | PrimaryProvider::Meta
             | PrimaryProvider::OpenCodeGo
             | PrimaryProvider::Wafer => {
                 // Preserve the xAI snapshot only when crossing out of xAI.
@@ -1835,6 +1857,9 @@ impl AppView {
             deepseek_operation_generation: 0,
             deepseek_runtime_update_pending: false,
             pending_deepseek_rebind_agents: Default::default(),
+            meta_operation_generation: 0,
+            meta_runtime_update_pending: false,
+            pending_meta_rebind_agents: Default::default(),
             opencode_go_operation_generation: 0,
             opencode_go_runtime_update_pending: false,
             pending_opencode_go_rebind_agents: Default::default(),
@@ -2161,6 +2186,11 @@ impl AppView {
         let names: Vec<String> = if restricted {
             TIER_RESTRICTED_COMMANDS
                 .iter()
+                .filter(|name| {
+                    !(**name == "imagine"
+                        && self.current_ui.image_generation_provider
+                            == Some(xai_grok_shell::agent::config::ImageGenerationProvider::OpenAi))
+                })
                 .map(|n| (*n).to_string())
                 .collect()
         } else {
@@ -6425,6 +6455,9 @@ pub(crate) mod tests {
             deepseek_operation_generation: 0,
             deepseek_runtime_update_pending: false,
             pending_deepseek_rebind_agents: Default::default(),
+            meta_operation_generation: 0,
+            meta_runtime_update_pending: false,
+            pending_meta_rebind_agents: Default::default(),
             opencode_go_operation_generation: 0,
             opencode_go_runtime_update_pending: false,
             pending_opencode_go_rebind_agents: Default::default(),

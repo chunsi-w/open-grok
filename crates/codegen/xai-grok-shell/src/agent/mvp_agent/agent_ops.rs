@@ -2225,6 +2225,45 @@ impl MvpAgent {
     }
     /// Build image generation config.
     ///
+    /// Build the OpenAI Images config from already-resolved ChatGPT OAuth
+    /// credentials. Split from the credential load so tests can exercise the
+    /// wiring without the process-global `grok_home()` cache.
+    pub(super) fn openai_image_gen_config(
+        &self,
+        credentials: &crate::codex_auth::CodexCredentials,
+    ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
+        use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        use crate::agent::config::ImageGenerationProvider;
+
+        let cfg = self.cfg.borrow();
+        let mut headers = indexmap::IndexMap::new();
+        headers.insert(
+            "originator".to_owned(),
+            crate::codex_auth::CODEX_ORIGINATOR.to_owned(),
+        );
+        if let Some(account_id) = credentials.account_id.as_deref() {
+            headers.insert("ChatGPT-Account-ID".to_owned(), account_id.to_owned());
+        }
+        if credentials.account_is_fedramp {
+            headers.insert("X-OpenAI-Fedramp".to_owned(), "true".to_owned());
+        }
+        ImageGenConfig::Enabled {
+            provider: ImageGenerationProvider::OpenAi,
+            // The OAuth-only client never sends the static field; the
+            // live identity-anchored resolver below is the sole bearer
+            // source, so don't copy the token here.
+            api_key: String::new(),
+            base_url: crate::codex_auth::inference_base_url(),
+            extra_headers: headers,
+            api_key_provider: Some(crate::codex_auth::image_api_key_provider(credentials)),
+            image_gen_enabled: cfg.resolve_image_gen().value,
+            image_edit_enabled: cfg.resolve_image_edit().value,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+        }
+    }
+
     /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
     /// `sampling_config.api_key` carries the OAuth bearer for session users (the
     /// `api_key_provider` refreshes it per request), so IC authenticates and
@@ -2233,6 +2272,37 @@ impl MvpAgent {
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        use crate::agent::config::ImageGenerationProvider;
+
+        let provider = self
+            .cfg
+            .borrow()
+            .ui
+            .image_generation_provider
+            .unwrap_or_default();
+        if provider == ImageGenerationProvider::OpenAi {
+            // ChatGPT-OAuth-only, matching upstream codex-rs's
+            // `image_generation_available` gate (`uses_codex_backend` excludes
+            // `AuthMode::ApiKey`): `load_credentials` only surfaces the
+            // isolated OAuth token store, and the tool client additionally
+            // refuses to send any static or legacy-provider bearer.
+            let credentials = match crate::codex_auth::load_credentials() {
+                Ok(Some(credentials)) if credentials.supports_image_generation() => credentials,
+                Ok(Some(_)) => {
+                    tracing::info!(
+                        "OpenAI image generation disabled for ChatGPT Free account"
+                    );
+                    return ImageGenConfig::Disabled;
+                }
+                Ok(None) => return ImageGenConfig::Disabled,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to load isolated Codex image credentials");
+                    return ImageGenConfig::Disabled;
+                }
+            };
+            return self.openai_image_gen_config(&credentials);
+        }
+
         let Some(api_key) = self.xai_media_api_key() else {
             return ImageGenConfig::Disabled;
         };
@@ -2253,9 +2323,11 @@ impl MvpAgent {
             &base_url,
         );
         ImageGenConfig::Enabled {
+            provider,
             api_key,
             base_url,
             extra_headers: headers,
+            api_key_provider: None,
             image_gen_enabled: cfg.resolve_image_gen().value,
             image_edit_enabled: cfg.resolve_image_edit().value,
             model_override: cfg.resolve_image_gen_model_override(),

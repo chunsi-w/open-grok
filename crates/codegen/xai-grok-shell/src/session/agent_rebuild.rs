@@ -212,6 +212,7 @@ pub(crate) struct AgentRebuildSpec {
     /// Whether this session exposes a usable nested-agent tool surface.
     pub multi_agent_policy_enabled: bool,
     pub session_id_str: String,
+    pub team_scope_id: String,
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
     pub respect_gitignore: bool,
     pub path_not_found_hints: bool,
@@ -341,6 +342,7 @@ impl AgentRebuildSpec {
             subagents_max_depth,
             multi_agent_policy_enabled: _,
             session_id_str,
+            team_scope_id,
             blocking_wait_depth,
             respect_gitignore,
             path_not_found_hints,
@@ -488,7 +490,8 @@ impl AgentRebuildSpec {
                 ChannelBackend, SubagentBackendResource,
             };
             use xai_grok_tools::implementations::grok_build::task::types::{
-                MaxSubagentDepth, SessionIdResource, SubagentDepthCounter, SubagentEventSender,
+                AgentMailboxIdentity, MaxSubagentDepth, SessionIdResource, SubagentDepthCounter,
+                SubagentEventSender,
             };
             let backend = SubagentBackendResource(Arc::new(ChannelBackend::for_session(
                 event_tx.clone(),
@@ -506,6 +509,13 @@ impl AgentRebuildSpec {
             agent
                 .tool_bridge()
                 .update_resource(SessionIdResource(session_id_str.clone()))
+                .await;
+            agent
+                .tool_bridge()
+                .update_resource(AgentMailboxIdentity {
+                    team_scope_id: team_scope_id.clone(),
+                    agent_id: session_id_str.clone(),
+                })
                 .await;
             agent
                 .tool_bridge()
@@ -641,6 +651,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
         multi_agent_policy_enabled: true,
         session_id_str: "test-session".to_string(),
+        team_scope_id: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
         scheduler_background_loops: true,

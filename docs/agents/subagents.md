@@ -20,6 +20,7 @@ SubagentEvent mpsc  ──►  MvpAgent::start_subagent_coordinator (spawn_local
         │              await prompt result (or background)
         │              fold usage → parent; write meta; notify
         ├── Query / Cancel / ListActive / Completions / Outstanding
+        ├── ListAgents / SendAgentMessage / WaitAgentMessages
         ├── ValidateType / DescribeType
         └── ClearUsageNotApplied / MarkUsageNotApplied
 ```
@@ -37,6 +38,24 @@ SubagentEvent mpsc  ──►  MvpAgent::start_subagent_coordinator (spawn_local
 | Agent defs / prompts | `xai-grok-agent/` (`discovery`, `config`, `prompt/subagent_prompts`, templates) |
 | Worktrees | `session/worktree.rs` → `xai-grok-workspace/src/worktree/`, `xai-fast-worktree/` |
 | Child session spawn | `session/acp_session_impl/spawn.rs` |
+
+## Three distinct surfaces
+
+`task`, `agent_swarm`, and `workflow` all run child sessions through the same
+coordinator, but they are three separate model surfaces and must stay that way.
+Locked by `task_agent_swarm_and_workflow_stay_three_distinct_surfaces` in
+`…/task/types.rs`.
+
+| Surface | Tool id / kind | Shape | Turn ownership |
+| --- | --- | --- | --- |
+| Individual subagent | `task` / `ToolKind::Task` | One child, foreground or background | Foreground holds an **interruptible** wait |
+| Swarm | `agent_swarm` / `ToolKind::AgentSwarm` | Many members of the same shape, one prompt template | Holds an **orchestration** wait for the whole cohort |
+| Workflow | `workflow` / `ToolKind::Workflow` | Declarative multi-phase run on the workflow engine | Returns immediately; the run continues in the background |
+
+A single subagent stands alone: `task`'s `requires_expr` names only the
+background-task lifecycle kinds, so neither orchestrator has to be in the
+toolset. `agent_swarm` depends on `ToolKind::Task` (its members are ordinary
+subagents), never the reverse, and `workflow` depends on neither.
 
 ## Spawn / task tool flow
 
@@ -84,6 +103,24 @@ Scheduling and output:
 
 Swarm mode can be entered manually (`/swarm`, `/swarm on`) or for one turn (`/swarm <task>` / direct `agent_swarm`). Manual mode survives turns and takes precedence over one-shot triggers; task/tool activation auto-exits at the turn boundary.
 
+### Follow-ups during a swarm
+
+A foreground wait is typed (`ForegroundWaitKind` in `…/task/types.rs`), and the
+host counts the two kinds separately in `BlockingWaitState`:
+
+- A foreground `task` holds an **interruptible** wait. A prompt arriving during
+  it takes the send-now path and cancels the turn, so the new prompt runs next.
+- `agent_swarm` holds an **orchestration** wait. `queue_input` promotes an
+  explicit send-now to run next but never returns `cancel_running_turn`, because
+  aborting the turn drops the swarm future and `CancelResultReceiverOnDrop`
+  cancels every live member.
+
+So a follow-up typed during a swarm queues behind the running turn instead of
+discarding in-flight member work. To reach the orchestrator *during* the run,
+use the interjection path (`x.ai/interject`): it is consumed at the next model
+boundary and never cancels. `workflow` needs no special case — its tool call
+returns immediately and holds no wait.
+
 ## SubagentCoordinator lifecycle
 
 `SubagentCoordinator` is a field on `MvpAgent` (`RefCell`). It is **not** itself a long-lived OS thread; the **drain task** is.
@@ -97,6 +134,8 @@ Swarm mode can be entered manually (`/swarm`, `/swarm on`) or for one turn (`/sw
 | `completed` | Terminal results for poll / resume / finish re-emit; subject to eviction |
 | `pending_completions` | Buffered summaries for idle / completion drain |
 | `block_wait_slots` | Foreground `Query(block=true)` waiters |
+| `mailboxes` | Team-scoped FIFO messages keyed by `(root session, recipient agent)` |
+| `mailbox_waiters` | One bounded `wait_agent` waiter per team member |
 | `running_gauge` | `pending + active` count (recomputed, not ±1) |
 | `is_turn_active` | Parent turn flag for freeze/outstanding logic |
 | `subagent_usage_not_applied_prompts` | Sticky incomplete-bill markers per parent prompt |
@@ -105,7 +144,7 @@ Swarm mode can be entered manually (`/swarm`, `/swarm on`) or for one turn (`/sw
 
 - Takes `subagent_event_rx` **once** (idempotent no-op after).
 - Outer `spawn_local` loop on `SubagentEvent`.
-- Each **Spawn / Query / ValidateType / DescribeType** gets its **own** `spawn_local` so concurrent children do not block the drain.
+- The shared coordinator serializes lifecycle and mailbox routing; child runs and host callbacks remain on the existing `spawn_local` / `LocalSet` path.
 - Uses `LocalRef` into `MvpAgent` (LocalSet / `!Send` pattern — do not move across threads).
 - Builds `SubagentSpawnContext` from parent session (MCP pool, client hooks, tool snapshot, cwd, auth, models, …).
 
@@ -184,12 +223,34 @@ Parent session depth 0  →  may call task
 Child  session depth 1  →  task + agent_swarm + workflow stripped / calls rejected
 ```
 
+Mailbox tools are collaboration controls, not spawn surfaces. Flat children
+retain `list_agents`, `send_message`, `followup_task`, and `wait_agent`.
+
 Two complementary guards:
 
 1. **Call-time reject** in `TaskTool::run` when `SubagentDepthCounter` reaches the resolved max depth.
 2. **Toolset strip** in `handle_subagent_request`: at the resolved max depth, remove `ToolKind::Task`, `ToolKind::AgentSwarm`, and `ToolKind::Workflow`, then prune orphaned background task tools so the model never sees a nested spawn surface.
 
 Child `tool_context.subagent_depth` and shared `SubagentDepthCounter` are set to `parent_depth + 1` at spawn. The default is a flat tree. If ordinary task nesting is explicitly raised, agent-swarm and workflow members are still forced flat; their cohort/script is the only orchestrator. Flat children also disable the Codex-v2 multi-agent policy bit at spawn and during every sampling-config reconstruction, so `ultra` effort cannot inject proactive-delegation instructions they have no tools to satisfy.
+
+## Team mailboxes
+
+Every session receives an `AgentMailboxIdentity`: `agent_id` is the current
+session ID and `team_scope_id` is the root parent session ID (the same value for
+the root). This is intentionally separate from task polling's
+`parent_session_id` binding.
+
+- `list_agents` returns the root plus pending, active, and retained completed children.
+- `send_message` appends to the recipient's bounded FIFO inbox without starting a turn.
+- `wait_agent` drains only the caller's inbox and supports a capped blocking wait.
+- `followup_task` delivers through a live `SessionHandle`: active turns consume
+  it at an interjection boundary; an idle root starts a synthetic agent-message turn.
+
+Finished children reject new mail and must be continued through `resume_from`,
+which creates a new child ID. Every accepted message emits a persisted
+`SubagentMessage` update on the root session; the pager renders a bounded
+preview. Model delivery uses an explicit `<agent_message>` envelope and treats
+peer content as untrusted input, never user consent or permission.
 
 ## Permissions vs plan mode
 

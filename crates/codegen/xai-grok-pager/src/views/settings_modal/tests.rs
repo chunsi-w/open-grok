@@ -770,6 +770,16 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
     );
 }
 
+#[test]
+fn default_registry_contains_meta_api_key_secret() {
+    let registry = crate::settings::SettingsRegistry::defaults();
+    let meta = registry
+        .find("meta_api_key")
+        .expect("Meta API key must be available in Settings");
+    assert_eq!(meta.label, "Meta API key");
+    assert!(matches!(meta.kind, SettingKind::Secret));
+}
+
 /// The default registry contains Appearance settings
 /// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
 /// `multiline_mode`, the Agent entries `permission_mode` and
@@ -896,6 +906,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "plan_mode",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
+            // SHELL-owned image provider (Models category, restart-required).
+            "image_generation_provider",
             // SHELL-owned default_model (Models category).
             "default_model",
             // Kimi service selector and isolated credentials.
@@ -906,6 +918,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "fireworks_api_key",
             // Direct DeepSeek isolated credential.
             "deepseek_api_key",
+            // Meta API isolated credential.
+            "meta_api_key",
             // OpenCode Go isolated credential and opt-in discovered models.
             "opencode_go_api_key",
             // Wafer AI isolated credential.

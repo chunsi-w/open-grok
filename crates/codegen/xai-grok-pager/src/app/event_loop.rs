@@ -122,6 +122,7 @@ fn startup_codex_freshness_required(
             PrimaryProvider::Kimi
             | PrimaryProvider::Fireworks
             | PrimaryProvider::DeepSeek
+            | PrimaryProvider::Meta
             | PrimaryProvider::OpenCodeGo
             | PrimaryProvider::Wafer => false,
         },
@@ -147,6 +148,7 @@ fn plan_startup_auth(
             PrimaryProvider::Kimi
             | PrimaryProvider::Fireworks
             | PrimaryProvider::DeepSeek
+            | PrimaryProvider::Meta
             | PrimaryProvider::OpenCodeGo
             | PrimaryProvider::Wafer => StartupAuthPlan::Ready,
         };
@@ -159,6 +161,7 @@ fn plan_startup_auth(
         | PrimaryProvider::Kimi
         | PrimaryProvider::Fireworks
         | PrimaryProvider::DeepSeek
+        | PrimaryProvider::Meta
         | PrimaryProvider::OpenCodeGo
         | PrimaryProvider::Wafer => StartupAuthPlan::Ready,
     }

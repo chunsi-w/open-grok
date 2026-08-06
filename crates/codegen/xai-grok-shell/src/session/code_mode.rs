@@ -82,6 +82,10 @@ pub(crate) fn is_code_mode_direct_only_tool(name: &str) -> bool {
             | "wait_commands_or_subagents"
             | "kill_task"
             | "kill_command_or_subagent"
+            | "list_agents"
+            | "send_message"
+            | "followup_task"
+            | "wait_agent"
     )
 }
 
@@ -1634,6 +1638,10 @@ mod tests {
             "wait_commands_or_subagents",
             "kill_task",
             "kill_command_or_subagent",
+            "list_agents",
+            "send_message",
+            "followup_task",
+            "wait_agent",
         ] {
             assert!(
                 is_code_mode_direct_only_tool(direct_only),

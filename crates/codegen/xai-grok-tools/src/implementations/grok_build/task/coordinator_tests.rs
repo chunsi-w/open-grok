@@ -1,6 +1,7 @@
 use super::*;
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
+    AgentMailboxIdentity, AgentMailboxMessage, AgentMailboxMessageKind, AgentMessageDeliveryStatus,
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
     SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
     SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
@@ -1501,5 +1502,107 @@ async fn completed_cache_evicts_oldest_entry_at_cap() {
             .await
             .is_some()
     );
+    harness.actor.abort();
+}
+
+fn mailbox_identity(team_scope_id: &str, agent_id: &str) -> AgentMailboxIdentity {
+    AgentMailboxIdentity {
+        team_scope_id: team_scope_id.to_string(),
+        agent_id: agent_id.to_string(),
+    }
+}
+
+fn mailbox_message(
+    id: &str,
+    identity: &AgentMailboxIdentity,
+    target: &str,
+    body: &str,
+) -> AgentMailboxMessage {
+    AgentMailboxMessage {
+        message_id: id.to_string(),
+        team_scope_id: identity.team_scope_id.clone(),
+        from_agent_id: identity.agent_id.clone(),
+        to_agent_id: target.to_string(),
+        kind: AgentMailboxMessageKind::Message,
+        body: body.to_string(),
+        created_at_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn team_mailbox_lists_pending_child_and_delivers_fifo() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let backend = harness.backend.clone();
+    let spawn = tokio::spawn(async move { backend.spawn(request("mail-child", true)).await });
+    let _ = harness.requests.recv().await.expect("spawn request");
+
+    let root = mailbox_identity("parent", "parent");
+    let roster = harness.backend.list_agents(root.clone()).await;
+    assert_eq!(roster.team_scope_id, "parent");
+    assert!(roster.agents.iter().any(|agent| {
+        agent.agent_id == "mail-child" && !agent.is_root && agent.status == "pending"
+    }));
+
+    for (id, body) in [("m1", "first"), ("m2", "second")] {
+        let output = harness
+            .backend
+            .send_agent_message(
+                root.clone(),
+                "mail-child",
+                mailbox_message(id, &root, "mail-child", body),
+            )
+            .await
+            .expect("message accepted");
+        assert_eq!(output.status, AgentMessageDeliveryStatus::Queued);
+    }
+
+    let child = mailbox_identity("parent", "mail-child");
+    let inbox = harness.backend.wait_agent_messages(child, 0).await;
+    assert!(!inbox.timed_out);
+    assert_eq!(
+        inbox
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+
+    spawn.abort();
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn team_mailbox_rejects_foreign_scope_and_self_send() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let backend = harness.backend.clone();
+    let spawn = tokio::spawn(async move { backend.spawn(request("mail-child", true)).await });
+    let _ = harness.requests.recv().await.expect("spawn request");
+
+    let foreign = mailbox_identity("foreign-parent", "foreign-parent");
+    let error = harness
+        .backend
+        .send_agent_message(
+            foreign.clone(),
+            "mail-child",
+            mailbox_message("foreign", &foreign, "mail-child", "no"),
+        )
+        .await
+        .expect_err("foreign team must not address child");
+    assert!(error.contains("not found"));
+
+    let root = mailbox_identity("parent", "parent");
+    let error = harness
+        .backend
+        .send_agent_message(
+            root.clone(),
+            "root",
+            mailbox_message("self", &root, "root", "loop"),
+        )
+        .await
+        .expect_err("self send must fail");
+    assert!(error.contains("itself"));
+
+    spawn.abort();
     harness.actor.abort();
 }

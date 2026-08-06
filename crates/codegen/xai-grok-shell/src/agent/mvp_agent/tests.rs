@@ -3048,6 +3048,65 @@ async fn prepare_image_gen_config_sends_client_identifier_header() {
          applies the coding ZDR opt-out to Build traffic"
     );
 }
+
+/// The OpenAI image config is built from the isolated Codex OAuth identity:
+/// Codex originator + account/FedRAMP headers, the Codex inference base URL,
+/// no static token copy, and a mandatory live identity-anchored resolver.
+/// Hermetic by construction: the credential load (process-global home) is
+/// covered by `codex_auth`'s own tests, so this test injects credentials.
+#[tokio::test(flavor = "current_thread")]
+async fn openai_image_gen_config_uses_isolated_codex_identity() {
+    use crate::agent::config::ImageGenerationProvider;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+
+    let credentials = crate::codex_auth::CodexCredentials {
+        access_token: "codex-image-token".to_owned(),
+        account_id: Some("account-123".to_owned()),
+        chatgpt_user_id: Some("user-123".to_owned()),
+        email: None,
+        plan_type: Some("plus".to_owned()),
+        is_workspace_account: false,
+        account_is_fedramp: true,
+    };
+
+    let agent = build_minimal_agent_for_tests();
+    let ImageGenConfig::Enabled {
+        provider,
+        api_key,
+        base_url,
+        extra_headers,
+        api_key_provider,
+        tier_restricted,
+        ..
+    } = agent.openai_image_gen_config(&credentials)
+    else {
+        panic!("expected OpenAI image generation to be enabled");
+    };
+    assert_eq!(provider, ImageGenerationProvider::OpenAi);
+    assert!(
+        api_key.is_empty(),
+        "the OAuth-only OpenAI route must not copy the token into the unused static field"
+    );
+    assert_eq!(base_url, crate::codex_auth::inference_base_url());
+    assert_eq!(
+        extra_headers.get("ChatGPT-Account-ID").map(String::as_str),
+        Some("account-123")
+    );
+    assert_eq!(
+        extra_headers.get("X-OpenAI-Fedramp").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        extra_headers.get("originator").map(String::as_str),
+        Some(crate::codex_auth::CODEX_ORIGINATOR)
+    );
+    assert!(
+        api_key_provider.is_some(),
+        "OpenAI image route must keep a live identity-anchored Codex resolver"
+    );
+    assert!(!tier_restricted);
+}
+
 /// Same contract for video generation (also a direct API call).
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_video_gen_config_sends_client_identifier_header() {

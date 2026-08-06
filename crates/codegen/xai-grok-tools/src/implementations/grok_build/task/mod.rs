@@ -1073,7 +1073,7 @@ mod tests {
             }
         }
         let wait_closed_for_factory = Arc::clone(&wait_closed);
-        resources.insert(SubagentForegroundWait::new(move || {
+        resources.insert(SubagentForegroundWait::new(move |_kind| {
             Box::new(WaitProbe(Arc::clone(&wait_closed_for_factory)))
         }));
 

@@ -11,6 +11,10 @@ revision as the Code Mode port:
 The live model-catalog, per-turn routing, response-stream, and compaction
 compatibility passes were refreshed against Codex commit
 `0f44bca9154e056a32fde7a89026b4620599e6f2`.
+The client-side image-generation extension was refreshed against Codex `main`
+at `6d4d9442c7142c08ac5c5098dfd6e82d8cd9f65a`; this includes the
+`x-codex-image-turn-id` correlation added by upstream commit
+`6219b7c40fc9`.
 
 ## Live model catalog
 
@@ -215,10 +219,30 @@ compiled local xAI search model. The local tool remains hidden across in-place
 model switches unless the user configured a non-default search model, which is
 treated as an explicit cross-provider opt-in.
 
-xAI Imagine media tools are provider scoped. Codex bearer tokens are never
-reused as static credentials for xAI image or video endpoints, and xAI media
-tools are hidden while Codex is active, including after an in-place model
-switch.
+Image generation follows codex-rs's client-extension shape rather than
+advertising the hosted Responses `image_generation` tool. Settings can select
+**Grok Imagine** (the default) or **OpenAI Images**:
+
+- Grok Imagine remains xAI-scoped. Codex bearer tokens are never reused for
+  xAI image or video endpoints, and these tools stay hidden on non-xAI routes.
+- OpenAI Images calls `POST /images/generations` and `/images/edits` below the
+  Codex inference base, uses `gpt-image-2`, includes the Codex originator,
+  account/FedRAMP headers, and `x-codex-image-turn-id`, and resolves the live
+  bearer only from the identity-anchored `codex-auth.json` credential. The
+  request/response shape mirrors `codex-api/src/endpoint/images.rs` and
+  `ext/image-generation` at the pinned refresh.
+- OpenAI Images is ChatGPT-OAuth-only. Upstream's `image_generation_available`
+  gate (`core/src/tools/spec_plan.rs`) requires auth that `uses_codex_backend`,
+  which excludes `AuthMode::ApiKey`; the fork mirrors this by surfacing only
+  the isolated OAuth token store and by having the tool client refuse any
+  static or legacy-provider bearer — no OpenAI API key path is offered.
+- Known ChatGPT Free accounts do not receive the OpenAI image tools, matching
+  codex-rs's plan gate (`account_plan_type() == Some(PlanType::Free)`).
+  Unknown plan labels fail open to the server's authoritative entitlement
+  check.
+- The OpenAI selection is an explicit cross-provider opt-in, so an xAI or
+  third-party chat model may use OpenAI Images without credential crossover.
+  Video generation remains xAI-only.
 
 ## Maintenance
 

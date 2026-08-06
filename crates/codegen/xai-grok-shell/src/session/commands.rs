@@ -795,6 +795,12 @@ pub enum SessionCommand {
         /// text-only / older clients.
         images: Vec<acp::ImageContent>,
     },
+    /// Wake this session with a typed message from another agent in the same
+    /// collaboration team. Unlike `Interject`, the sender is another model,
+    /// not the user, and the pager must not render it as user-authored input.
+    AgentMessage {
+        message: xai_grok_tools::implementations::grok_build::task::types::AgentMailboxMessage,
+    },
     /// Trigger a model turn so the model can print a visible goal progress
     /// summary.  The goal orchestrator injects a system reminder into context
     /// (via `push_parent_reminder`) *before* sending this command.  The session

@@ -464,6 +464,17 @@ impl ChildControl for ShellChildRuntime {
         });
         let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
     }
+    fn deliver_followup(
+        &self,
+        message: &xai_grok_tools::implementations::grok_build::task::types::AgentMailboxMessage,
+    ) -> bool {
+        self.child_handle
+            .cmd_tx
+            .send(SessionCommand::AgentMessage {
+                message: message.clone(),
+            })
+            .is_ok()
+    }
 }
 #[derive(Default)]
 pub(crate) struct ShellCompletionData {
@@ -2455,7 +2466,7 @@ async fn cancel_pending_shell_child(
     persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
     result
 }
-fn emit_subagent_notification(
+pub(crate) fn emit_subagent_notification(
     gateway: &GatewaySender,
     parent_session_id: &str,
     update: SessionUpdate,

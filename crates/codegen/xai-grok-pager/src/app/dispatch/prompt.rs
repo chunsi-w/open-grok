@@ -609,6 +609,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     fireworks_api_key_status: crate::settings::SecretStatus::Missing,
                     deepseek_api_key_status:
                         crate::app::dispatch::settings::ui::deepseek_api_key_status(),
+                    meta_api_key_status: crate::app::dispatch::settings::ui::meta_api_key_status(),
                     opencode_go_api_key_status:
                         crate::app::dispatch::settings::ui::opencode_go_api_key_status(),
                     wafer_api_key_status: crate::app::dispatch::settings::ui::wafer_api_key_status(

@@ -1091,6 +1091,8 @@ pub enum ModelProvider {
     Fireworks,
     #[serde(rename = "deepseek", alias = "deep_seek", alias = "deepseek_api")]
     DeepSeek,
+    #[serde(alias = "meta_ai", alias = "meta_api")]
+    Meta,
     #[serde(alias = "opencode-go", alias = "opencode_go")]
     OpenCodeGo,
     #[serde(alias = "wafer_ai")]
@@ -1109,6 +1111,8 @@ pub enum ResponsesDialect {
     /// DeepSeek's native OpenAI-compatible Responses API (V4 Flash and later).
     /// Stateless (`store: false`), with DeepSeek-owned reasoning-effort mapping.
     DeepSeek,
+    /// Meta Model API's OpenAI-compatible, stateless Responses contract.
+    Meta,
 }
 
 /// Wire representation used for Code Mode's client-executed `exec` tool.
@@ -1339,6 +1343,24 @@ impl ProviderProfile {
         xai_services: XaiServicePolicy::Denied,
     };
 
+    /// Meta's OpenAI-compatible Responses API. Muse Spark models use standard
+    /// function calls and OpenAI-shaped hosted web search with provider-local
+    /// API-key authentication.
+    pub const META: Self = Self {
+        provider: ModelProvider::Meta,
+        backends: ProviderBackends {
+            chat_completions: false,
+            responses: Some(ResponsesDialect::Meta),
+            messages: false,
+        },
+        code_mode_transport: CodeModeTransport::FunctionEnvelope,
+        hosted_tool_dialect: Some(HostedToolDialect::OpenAi),
+        native_web_search: true,
+        request_metadata: RequestMetadataPolicy::StandardHeadersOnly,
+        session_auth: BuiltInSessionAuthKind::ApiKeyOnly,
+        xai_services: XaiServicePolicy::Denied,
+    };
+
     /// OpenCode Go routes individual models over either OpenAI-compatible Chat
     /// Completions or Anthropic Messages while sharing one provider API key.
     pub const OPEN_CODE_GO: Self = Self {
@@ -1402,6 +1424,10 @@ impl ProviderProfile {
         self.provider.is_deepseek()
     }
 
+    pub const fn is_meta(self) -> bool {
+        self.provider.is_meta()
+    }
+
     pub const fn is_open_code_go(self) -> bool {
         self.provider.is_open_code_go()
     }
@@ -1436,6 +1462,7 @@ impl ModelProvider {
             Self::Kimi => "kimi",
             Self::Fireworks => "fireworks",
             Self::DeepSeek => "deepseek",
+            Self::Meta => "meta",
             Self::OpenCodeGo => "opencode_go",
             Self::Wafer => "wafer",
         }
@@ -1449,6 +1476,7 @@ impl ModelProvider {
             Self::Kimi => "Kimi",
             Self::Fireworks => "Fireworks AI",
             Self::DeepSeek => "DeepSeek",
+            Self::Meta => "Meta API",
             Self::OpenCodeGo => "OpenCode Go",
             Self::Wafer => "Wafer AI",
         }
@@ -1474,6 +1502,10 @@ impl ModelProvider {
         matches!(self, Self::DeepSeek)
     }
 
+    pub const fn is_meta(self) -> bool {
+        matches!(self, Self::Meta)
+    }
+
     pub const fn is_open_code_go(self) -> bool {
         matches!(self, Self::OpenCodeGo)
     }
@@ -1490,6 +1522,7 @@ impl ModelProvider {
             Self::Kimi => ProviderProfile::KIMI,
             Self::Fireworks => ProviderProfile::FIREWORKS,
             Self::DeepSeek => ProviderProfile::DEEPSEEK,
+            Self::Meta => ProviderProfile::META,
             Self::OpenCodeGo => ProviderProfile::OPEN_CODE_GO,
             Self::Wafer => ProviderProfile::WAFER,
         }
@@ -1791,6 +1824,22 @@ mod tests {
                 backends: ProviderBackends {
                     chat_completions: true,
                     responses: Some(ResponsesDialect::DeepSeek),
+                    messages: false,
+                },
+                code_mode_transport: CodeModeTransport::FunctionEnvelope,
+                hosted_tools: Some(HostedToolDialect::OpenAi),
+                native_web_search: true,
+                request_metadata: RequestMetadataPolicy::StandardHeadersOnly,
+                session_auth: BuiltInSessionAuthKind::ApiKeyOnly,
+                xai_services: XaiServicePolicy::Denied,
+            },
+            Case {
+                provider: ModelProvider::Meta,
+                id: "meta",
+                name: "Meta API",
+                backends: ProviderBackends {
+                    chat_completions: false,
+                    responses: Some(ResponsesDialect::Meta),
                     messages: false,
                 },
                 code_mode_transport: CodeModeTransport::FunctionEnvelope,

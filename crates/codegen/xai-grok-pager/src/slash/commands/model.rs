@@ -74,7 +74,7 @@ impl SlashCommand for ModelCommand {
         // often contain spaces ("Grok 4.5"); if we split on the last token
         // first, a shorter catalog entry ("Grok") would steal the prefix and
         // treat "4.5" as an effort level.
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
+        if let Some(id) = resolve_model(ctx.models, trimmed) {
             return CommandResult::Action(Action::SetDefaultModel(id));
         }
 
@@ -105,25 +105,73 @@ impl SlashCommand for ModelCommand {
     }
 }
 
-/// Look up a model by case-insensitive display name OR model id match.
+/// Resolve provider-qualified selectors first, then catalog ids, then
+/// unqualified display names/slugs when they identify exactly one model.
 fn resolve_model(models: &ModelState, name: &str) -> Option<acp::ModelId> {
-    models.resolve_by_name_or_id(name)
+    let query = name.trim();
+    unique_model_match(models, |id, info| {
+        model_selector(id, info).eq_ignore_ascii_case(query)
+    })
+    .or_else(|| unique_model_match(models, |id, _| id.0.as_ref().eq_ignore_ascii_case(query)))
+    .or_else(|| {
+        unique_model_match(models, |id, info| {
+            info.name.eq_ignore_ascii_case(query)
+                || model_catalog_slug(id, info).eq_ignore_ascii_case(query)
+        })
+    })
+}
+
+fn unique_model_match(
+    models: &ModelState,
+    mut predicate: impl FnMut(&acp::ModelId, &acp::ModelInfo) -> bool,
+) -> Option<acp::ModelId> {
+    let mut matches = models
+        .available
+        .iter()
+        .filter_map(|(id, info)| predicate(id, info).then_some(id.clone()));
+    let matched = matches.next()?;
+    matches.next().is_none().then_some(matched)
 }
 
 fn supports_reasoning_effort(info: &acp::ModelInfo) -> bool {
     supports_reasoning_effort_meta(info.meta.as_ref())
 }
 
-fn model_provider_label(info: &acp::ModelInfo) -> Option<&'static str> {
-    match info
-        .meta
+fn model_provider_id(info: &acp::ModelInfo) -> Option<&str> {
+    info.meta
         .as_ref()
         .and_then(|meta| meta.get("provider"))
         .and_then(serde_json::Value::as_str)
-    {
-        Some("codex" | "openai" | "openai_codex") => Some("OpenAI"),
+}
+
+fn model_provider_label(info: &acp::ModelInfo) -> Option<&str> {
+    match model_provider_id(info) {
+        Some("codex" | "openai" | "openai_codex") => Some("OpenAI Codex"),
         Some("xai") => Some("xAI"),
-        _ => None,
+        Some("kimi" | "moonshot" | "moonshot_ai") => Some("Kimi"),
+        Some("fireworks" | "fireworks_ai") => Some("Fireworks AI"),
+        Some("deepseek" | "deep_seek" | "deepseek_api") => Some("DeepSeek"),
+        Some("opencode_go" | "opencode-go") => Some("OpenCode Go"),
+        Some("wafer" | "wafer_ai") => Some("Wafer AI"),
+        Some(provider) => Some(provider),
+        None => None,
+    }
+}
+
+fn model_catalog_slug<'a>(id: &'a acp::ModelId, info: &acp::ModelInfo) -> &'a str {
+    let id = id.0.as_ref();
+    let Some(provider) = model_provider_id(info) else {
+        return id;
+    };
+    id.strip_prefix(provider)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .unwrap_or(id)
+}
+
+fn model_selector(id: &acp::ModelId, info: &acp::ModelInfo) -> String {
+    match model_provider_id(info) {
+        Some(provider) => format!("{provider}:{}", model_catalog_slug(id, info)),
+        None => info.name.clone(),
     }
 }
 
@@ -153,11 +201,9 @@ fn format_context_window(tokens: u64) -> String {
     }
 }
 
-fn model_picker_description(info: &acp::ModelInfo) -> String {
+fn model_picker_description(id: &acp::ModelId, info: &acp::ModelInfo) -> String {
     let mut parts = Vec::with_capacity(3);
-    if let Some(provider) = model_provider_label(info) {
-        parts.push(provider.to_string());
-    }
+    parts.push(model_catalog_slug(id, info).to_string());
     if let Some(tokens) = model_context_window(info) {
         parts.push(format_context_window(tokens));
     }
@@ -186,18 +232,18 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
 /// Returns the matched model id when `args_query` is `"<reasoning-model> ..."`.
 /// Longest-name-first to disambiguate names that share a prefix.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
-    let mut candidates: Vec<(&acp::ModelId, &str)> = models
+    let mut candidates: Vec<(&acp::ModelId, String)> = models
         .available
         .iter()
         .filter(|(_, info)| supports_reasoning_effort(info))
-        .map(|(id, info)| (id, info.name.as_str()))
+        .map(|(id, info)| (id, model_selector(id, info)))
         .collect();
     candidates.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
 
     for (id, name) in candidates {
         if args_query.len() > name.len()
             && args_query.is_char_boundary(name.len())
-            && args_query[..name.len()].eq_ignore_ascii_case(name)
+            && args_query[..name.len()].eq_ignore_ascii_case(&name)
             && args_query[name.len()..].starts_with(char::is_whitespace)
         {
             return Some(id.clone());
@@ -210,24 +256,47 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 /// `insert_text` so the prompt widget chains into the effort sub-menu.
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
+    let mut entries: Vec<_> = models.available.iter().collect();
+    entries.sort_by(|(id_a, info_a), (id_b, info_b)| {
+        model_provider_label(info_a)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .cmp(
+                &model_provider_label(info_b)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+            )
+            .then_with(|| {
+                info_a
+                    .name
+                    .to_ascii_lowercase()
+                    .cmp(&info_b.name.to_ascii_lowercase())
+            })
+            .then_with(|| model_catalog_slug(id_a, info_a).cmp(model_catalog_slug(id_b, info_b)))
+    });
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
-    for (id, info) in &models.available {
+    for (id, info) in entries {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
+        let selector = model_selector(id, info);
+        let row_label = match model_provider_label(info) {
+            Some(provider) => format!("{provider} · {}", info.name),
+            None => info.name.clone(),
+        };
 
         let display = if is_current {
-            format!("{} (current)", info.name)
+            format!("{row_label} (current)")
         } else {
-            info.name.clone()
+            row_label
         };
 
         // Trailing space on reasoning models: signals "more input
         // expected" to the prompt widget so Enter advances to effort
         // phase instead of submitting.
         let insert_text = if supports {
-            format!("{} ", info.name)
+            format!("{selector} ")
         } else {
-            info.name.clone()
+            selector
         };
 
         items.push(ArgItem {
@@ -235,11 +304,11 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             match_text: format!(
                 "{} {} {}",
                 info.name,
-                id.0,
+                model_catalog_slug(id, info),
                 model_provider_label(info).unwrap_or_default()
             ),
             insert_text,
-            description: model_picker_description(info),
+            description: model_picker_description(id, info),
         });
     }
     items
@@ -252,7 +321,7 @@ fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgIt
         Some(info) => info,
         None => return Vec::new(),
     };
-    let model_name = info.name.clone();
+    let model_name = model_selector(model_id, info);
     let is_current_model = models.current.as_ref() == Some(model_id);
     let options = models.reasoning_effort_options_for(model_id);
     build_effort_arg_items(
@@ -397,22 +466,56 @@ mod tests {
         let items = build_model_items(&state);
         let codex = items
             .iter()
-            .find(|item| item.insert_text == "GPT-5.6 Sol")
+            .find(|item| item.insert_text == "codex:gpt-5.6-sol")
             .expect("Codex model row");
+        assert_eq!(codex.display, "OpenAI Codex · GPT-5.6 Sol");
         assert_eq!(
             codex.description,
-            "OpenAI · 353K context · Model description"
+            "gpt-5.6-sol · 353K context · Model description"
         );
         assert!(codex.match_text.contains("gpt-5.6-sol"));
-        assert!(codex.match_text.contains("OpenAI"));
+        assert!(codex.match_text.contains("OpenAI Codex"));
 
         let xai = items
             .iter()
-            .find(|item| item.insert_text == "Grok Build")
+            .find(|item| item.insert_text == "xai:grok-build")
             .expect("xAI model row");
-        assert_eq!(xai.description, "xAI · 500K context · Model description");
+        assert_eq!(xai.display, "xAI · Grok Build");
+        assert_eq!(
+            xai.description,
+            "grok-build · 500K context · Model description"
+        );
 
         assert_eq!(format_context_window(353_400), "353.4K context");
+    }
+
+    #[test]
+    fn duplicate_model_names_are_sorted_and_selected_by_provider() {
+        let mut state = ModelState::default();
+        let (codex_id, codex) = provider_model("gpt-5.6-sol", "GPT-5.6 Sol", "codex", 353_000);
+        let (xai_id, xai) = provider_model("xai:gpt-5.6-sol", "GPT-5.6 Sol", "xai", 353_000);
+        state.available.insert(xai_id.clone(), xai);
+        state.available.insert(codex_id.clone(), codex);
+
+        let items = build_model_items(&state);
+        assert_eq!(items[0].display, "OpenAI Codex · GPT-5.6 Sol");
+        assert_eq!(items[0].insert_text, "codex:gpt-5.6-sol");
+        assert_eq!(items[1].display, "xAI · GPT-5.6 Sol");
+        assert_eq!(items[1].insert_text, "xai:gpt-5.6-sol");
+
+        let mut ctx = dummy_exec_ctx(&state);
+        assert!(matches!(
+            ModelCommand.run(&mut ctx, "codex:gpt-5.6-sol"),
+            CommandResult::Action(Action::SetDefaultModel(id)) if id == codex_id
+        ));
+        assert!(matches!(
+            ModelCommand.run(&mut ctx, "xai:gpt-5.6-sol"),
+            CommandResult::Action(Action::SetDefaultModel(id)) if id == xai_id
+        ));
+        assert!(matches!(
+            ModelCommand.run(&mut ctx, "GPT-5.6 Sol"),
+            CommandResult::Error(message) if message.contains("Unknown model")
+        ));
     }
 
     #[test]

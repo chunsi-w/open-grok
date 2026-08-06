@@ -858,6 +858,30 @@ async fn persist_setting_rejects_unknown_code_mode_choice() {
 }
 
 #[tokio::test]
+async fn persist_setting_rejects_unknown_image_generation_provider() {
+    use crate::settings::SettingValue;
+    let error = persist_setting(
+        "image_generation_provider",
+        SettingValue::Enum("automatic"),
+    )
+    .await
+    .expect_err("unknown image providers must fail closed");
+    assert!(error.contains("unknown value: automatic"));
+}
+
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_image_generation_provider() {
+    use crate::settings::SettingValue;
+    let error = persist_setting(
+        "image_generation_provider",
+        SettingValue::String("openai".to_owned()),
+    )
+    .await
+    .expect_err("image generation provider requires an Enum payload");
+    assert!(error.contains("persist_setting(image_generation_provider) expected Enum"));
+}
+
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_auxiliary_models() {
     use crate::settings::SettingValue;
     for key in ["recap_model", "memory_model"] {

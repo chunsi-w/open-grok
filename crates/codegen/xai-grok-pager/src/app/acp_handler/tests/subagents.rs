@@ -949,3 +949,34 @@
             crate::scrollback::blocks::SwarmMemberStatus::Running
         );
     }
+
+    #[test]
+    fn subagent_message_renders_auditable_system_block() {
+        let mut app = make_app_with_agent("sess-parent");
+        let update = XaiSessionUpdate::SubagentMessage {
+            message_id: "msg-1".into(),
+            team_scope_id: "sess-parent".into(),
+            from_agent_id: "child-a".into(),
+            to_agent_id: "child-b".into(),
+            kind: "message".into(),
+            body: "Check the parser edge case.".into(),
+            status: "queued".into(),
+            created_at_ms: 42,
+        };
+
+        assert!(handle(
+            make_ext_session_notification("sess-parent", update),
+            &mut app,
+        ));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let entry = agent
+            .scrollback
+            .entries_mut()
+            .last()
+            .expect("message block");
+        let RenderBlock::System(block) = &entry.block else {
+            panic!("expected system block");
+        };
+        assert!(block.text.contains("child-a → child-b"));
+        assert!(block.text.contains("Check the parser edge case."));
+    }

@@ -69,6 +69,10 @@ pub enum PromptOrigin {
         /// The subagent ID (without the `subagent-completed-` prefix).
         subagent_id: String,
     },
+    /// Follow-up turn injected by another agent in the same collaboration team.
+    AgentMessage {
+        message_id: String,
+    },
     WorkflowCompleted {
         completion_id: String,
     },
@@ -105,6 +109,10 @@ impl PromptOrigin {
             Self::SubagentCompleted {
                 subagent_id: subagent_id.to_string(),
             }
+        } else if let Some(message_id) = prompt_id.strip_prefix("agent-message-") {
+            Self::AgentMessage {
+                message_id: message_id.to_string(),
+            }
         } else if let Some(completion_id) = prompt_id.strip_prefix("workflow-completed-") {
             Self::WorkflowCompleted {
                 completion_id: completion_id.to_string(),
@@ -138,6 +146,7 @@ impl PromptOrigin {
             Self::User | Self::SchedulerFired | Self::PlanResume => false,
             Self::TaskCompleted { .. }
             | Self::SubagentCompleted { .. }
+            | Self::AgentMessage { .. }
             | Self::WorkflowCompleted { .. }
             | Self::NotificationDrain
             | Self::GoalSummary
@@ -148,6 +157,7 @@ impl PromptOrigin {
         match self {
             Self::TaskCompleted { task_id } => Some(task_id),
             Self::SubagentCompleted { subagent_id } => Some(subagent_id),
+            Self::AgentMessage { .. } => None,
             Self::WorkflowCompleted { completion_id } => Some(completion_id),
             Self::User
             | Self::NotificationDrain

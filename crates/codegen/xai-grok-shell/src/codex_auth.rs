@@ -211,6 +211,16 @@ impl CodexCredentials {
             is_workspace_account: self.is_workspace_account,
         }
     }
+
+    /// Codex's image-generation extension is unavailable to ChatGPT Free
+    /// accounts. Unknown future plan labels fail open and remain subject to the
+    /// server's authoritative entitlement check.
+    pub(crate) fn supports_image_generation(&self) -> bool {
+        !self
+            .plan_type
+            .as_deref()
+            .is_some_and(|plan| plan.eq_ignore_ascii_case("free"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1373,6 +1383,27 @@ impl xai_grok_sampler::BearerResolver for CodexBearerResolver {
     }
 }
 
+/// Adapter for tool clients that need the same identity-anchored Codex bearer
+/// as the sampler without depending on the sampler's richer auth trait.
+#[derive(Debug)]
+struct CodexImageApiKeyProvider {
+    resolver: CodexBearerResolver,
+}
+
+impl xai_grok_tools::types::ApiKeyProvider for CodexImageApiKeyProvider {
+    fn current_api_key(&self) -> Option<String> {
+        xai_grok_sampler::BearerResolver::current_bearer(&self.resolver)
+    }
+}
+
+pub(crate) fn image_api_key_provider(
+    credentials: &CodexCredentials,
+) -> xai_grok_tools::types::SharedApiKeyProvider {
+    Arc::new(CodexImageApiKeyProvider {
+        resolver: CodexBearerResolver::from_credentials(Some(credentials)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,6 +1414,23 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
         format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn image_generation_rejects_only_explicit_free_plan() {
+        let credentials = |plan_type: Option<&str>| CodexCredentials {
+            access_token: "token".to_owned(),
+            account_id: Some("account".to_owned()),
+            chatgpt_user_id: Some("user".to_owned()),
+            email: None,
+            plan_type: plan_type.map(str::to_owned),
+            is_workspace_account: false,
+            account_is_fedramp: false,
+        };
+        assert!(!credentials(Some("free")).supports_image_generation());
+        assert!(!credentials(Some("FREE")).supports_image_generation());
+        assert!(credentials(Some("plus")).supports_image_generation());
+        assert!(credentials(None).supports_image_generation());
     }
 
     fn endpoints(issuer: &str) -> CodexEndpoints {

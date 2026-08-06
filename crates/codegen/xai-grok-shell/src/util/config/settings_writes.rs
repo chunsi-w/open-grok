@@ -490,6 +490,13 @@ pub async fn set_code_mode(value: crate::agent::config::ToolModePreference) -> R
     update_config(|cfg| cfg.ui.code_mode = Some(value)).await
 }
 
+/// Persist the restart-required `[ui].image_generation_provider` route.
+pub async fn set_image_generation_provider(
+    value: crate::agent::config::ImageGenerationProvider,
+) -> Result<()> {
+    update_config(|cfg| cfg.ui.image_generation_provider = Some(value)).await
+}
+
 /// Persist `[ui].show_thinking_blocks` via `update_config`.
 pub async fn set_show_thinking_blocks(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_thinking_blocks = Some(value)).await

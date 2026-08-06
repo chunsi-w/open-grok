@@ -741,6 +741,23 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+    /// Auditable message routed between agents in one collaboration team.
+    ///
+    /// Sent on the root session's notification channel and persisted in its
+    /// `updates.jsonl`. Message bodies remain model-authored input and never
+    /// carry user-consent or permission semantics.
+    SubagentMessage {
+        message_id: String,
+        team_scope_id: String,
+        from_agent_id: String,
+        to_agent_id: String,
+        /// `"message"` or `"followup_task"`.
+        kind: String,
+        body: String,
+        /// `"queued"` or `"delivered"`.
+        status: String,
+        created_at_ms: u64,
+    },
     /// A subagent session has finished (success, failure, or cancellation).
     ///
     /// Sent on the PARENT session's notification channel.
@@ -2586,5 +2603,32 @@ mod tests {
         assert!(serde_json::from_str::<SessionUpdate>(missing_prompt_id).is_err());
         let missing_stop_reason = r#"{"sessionUpdate": "turn_completed", "prompt_id": "p-1"}"#;
         assert!(serde_json::from_str::<SessionUpdate>(missing_stop_reason).is_err());
+    }
+
+    #[test]
+    fn subagent_message_roundtrips_with_auditable_body() {
+        let update = SessionUpdate::SubagentMessage {
+            message_id: "msg-1".into(),
+            team_scope_id: "root-1".into(),
+            from_agent_id: "child-a".into(),
+            to_agent_id: "child-b".into(),
+            kind: "message".into(),
+            body: "Please verify the parser edge case.".into(),
+            status: "queued".into(),
+            created_at_ms: 42,
+        };
+        let json = serde_json::to_string(&update).expect("serialize");
+        let parsed: SessionUpdate = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            parsed,
+            SessionUpdate::SubagentMessage {
+                message_id,
+                body,
+                status,
+                ..
+            } if message_id == "msg-1"
+                && body == "Please verify the parser edge case."
+                && status == "queued"
+        ));
     }
 }

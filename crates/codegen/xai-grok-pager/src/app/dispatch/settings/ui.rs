@@ -7,14 +7,15 @@ use super::setters::{
     set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_enter_steers_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
-    set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
-    set_max_thoughts_width_inner, set_memory_model_inner, set_multiline_mode,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_recap_model_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    set_hunk_tracker_mode_inner, set_image_generation_provider_inner, set_invert_scroll_inner,
+    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_memory_model_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_recap_model_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
+    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -128,6 +129,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let kimi_code_api_key_status = kimi_code_api_key_status();
     let fireworks_api_key_status = fireworks_api_key_status();
     let deepseek_api_key_status = deepseek_api_key_status();
+    let meta_api_key_status = meta_api_key_status();
     let opencode_go_api_key_status = opencode_go_api_key_status();
     let wafer_api_key_status = wafer_api_key_status();
     let perplexity_api_key_status = perplexity_api_key_status();
@@ -170,6 +172,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 kimi_code_api_key_status,
                 fireworks_api_key_status,
                 deepseek_api_key_status,
+                meta_api_key_status,
                 opencode_go_api_key_status,
                 wafer_api_key_status,
                 opencode_go_models: app.opencode_go_models.clone(),
@@ -312,6 +315,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let kimi_code_api_key_status = kimi_code_api_key_status();
     let fireworks_api_key_status = fireworks_api_key_status();
     let deepseek_api_key_status = deepseek_api_key_status();
+    let meta_api_key_status = meta_api_key_status();
     let opencode_go_api_key_status = opencode_go_api_key_status();
     let wafer_api_key_status = wafer_api_key_status();
     let kimi_api_endpoint = app.kimi_api_endpoint.clone();
@@ -361,6 +365,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         kimi_code_api_key_status,
         fireworks_api_key_status,
         deepseek_api_key_status,
+        meta_api_key_status,
         opencode_go_api_key_status,
         wafer_api_key_status,
         opencode_go_models: app.opencode_go_models.clone(),
@@ -486,6 +491,32 @@ pub(in crate::app::dispatch) fn dispatch_open_deepseek_api_key_editor(
     let mut state = SettingsModalState::new(registry, ui_snapshot, pager_snapshot);
     if !state.try_open_deepseek_provider_login() {
         tracing::error!(target: "settings", "DeepSeek API-key setting is missing from the registry");
+        return vec![];
+    }
+    if let Some(agent) = get_visible_agent_mut(app) {
+        agent.active_modal = Some(ActiveModal::Settings {
+            state: Box::new(state),
+        });
+    } else if matches!(app.active_view, ActiveView::AgentDashboard)
+        && let Some(dashboard) = app.dashboard.as_mut()
+    {
+        dashboard.settings_modal = Some(Box::new(state));
+    }
+    vec![]
+}
+
+pub(in crate::app::dispatch) fn dispatch_open_meta_api_key_editor(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalState;
+
+    let registry = app.settings_registry.clone();
+    let ui_snapshot = app.current_ui.clone();
+    let pager_snapshot = build_pager_snapshot(app);
+    let mut state = SettingsModalState::new(registry, ui_snapshot, pager_snapshot);
+    if !state.try_open_meta_provider_login() {
+        tracing::error!(target: "settings", "Meta API-key setting is missing from the registry");
         return vec![];
     }
     if let Some(agent) = get_visible_agent_mut(app) {
@@ -1051,6 +1082,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         kimi_code_api_key_status: kimi_code_api_key_status(),
         fireworks_api_key_status: fireworks_api_key_status(),
         deepseek_api_key_status: deepseek_api_key_status(),
+        meta_api_key_status: meta_api_key_status(),
         opencode_go_api_key_status: opencode_go_api_key_status(),
         wafer_api_key_status: wafer_api_key_status(),
         opencode_go_models: app.opencode_go_models.clone(),
@@ -1098,6 +1130,19 @@ pub(in crate::app::dispatch) fn deepseek_api_key_status() -> crate::settings::Se
     } else if xai_grok_shell::auth::provider_api_key_is_configured(
         &xai_grok_tools::util::grok_home::grok_home(),
         xai_grok_shell::sampling::types::ModelProvider::DeepSeek,
+    ) {
+        crate::settings::SecretStatus::Stored
+    } else {
+        crate::settings::SecretStatus::Missing
+    }
+}
+
+pub(in crate::app::dispatch) fn meta_api_key_status() -> crate::settings::SecretStatus {
+    if xai_grok_shell::meta_models::environment_api_key_is_configured() {
+        crate::settings::SecretStatus::EnvironmentOverride
+    } else if xai_grok_shell::auth::provider_api_key_is_configured(
+        &xai_grok_tools::util::grok_home::grok_home(),
+        xai_grok_shell::sampling::types::ModelProvider::Meta,
     ) {
         crate::settings::SecretStatus::Stored
     } else {
@@ -1209,6 +1254,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("code_mode", SettingValue::Enum(value)) => {
             xai_grok_shell::agent::config::ToolModePreference::from_canonical(value)
                 .map(Action::SetCodeMode)
+        }
+        ("image_generation_provider", SettingValue::Enum(value)) => {
+            xai_grok_shell::agent::config::ImageGenerationProvider::from_canonical(value)
+                .map(Action::SetImageGenerationProvider)
         }
         ("toolset.ask_user_question.timeout_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(*b))
@@ -1395,6 +1444,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
             "deepseek_api_key",
             SettingValue::SecretStatus(crate::settings::SecretStatus::Missing),
         ) => Some(Action::ClearDeepSeekApiKey),
+        ("meta_api_key", SettingValue::SecretStatus(crate::settings::SecretStatus::Missing)) => {
+            Some(Action::ClearMetaApiKey)
+        }
         (
             "opencode_go_api_key",
             SettingValue::SecretStatus(crate::settings::SecretStatus::Missing),
@@ -1642,6 +1694,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 xai_grok_shell::agent::config::ToolModePreference::from_canonical(value)
             {
                 set_code_mode_inner(app, preference);
+            }
+        }
+        ("image_generation_provider", SettingValue::Enum(value)) => {
+            if let Some(provider) =
+                xai_grok_shell::agent::config::ImageGenerationProvider::from_canonical(value)
+            {
+                set_image_generation_provider_inner(app, provider);
             }
         }
         // ask_user_question timeout: if rollback equals the effective

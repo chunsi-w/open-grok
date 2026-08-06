@@ -267,6 +267,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 PrimaryProvider::Kimi => "Kimi",
                 PrimaryProvider::Fireworks => "Fireworks AI",
                 PrimaryProvider::DeepSeek => "DeepSeek",
+                PrimaryProvider::Meta => "Meta API",
                 PrimaryProvider::Wafer => "Wafer AI",
                 PrimaryProvider::OpenCodeGo => "OpenCode Go",
             };

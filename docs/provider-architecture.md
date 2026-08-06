@@ -30,6 +30,7 @@ Codex provider does not override an explicit model API key.
 | Kimi | Chat | none | client function tools | no | standard only | provider API key | denied |
 | Fireworks AI | Chat | none | client function tools | no | standard only | provider API key | denied |
 | DeepSeek direct | Chat, Responses (V4 Flash) | DeepSeek | OpenAI | yes (V4 Flash) | standard only | provider API key | denied |
+| Meta API | Responses | Meta | OpenAI | yes | standard only | provider API key | denied |
 | Wafer AI | Chat | none | client function tools | no | standard only | provider API key | denied |
 | OpenCode Go | Chat, Messages | none | client function tools | no | standard only | provider API key | denied |
 
@@ -50,6 +51,11 @@ normalizes Open Grok's reasoning menu to `none`/`low`/`high`/`max`, exposes the
 OpenAI-shaped hosted `web_search`, and never inherits Codex cache, turn-state,
 OAuth, or compaction behavior. Its live catalog intersects DeepSeek's `/models`
 response with curated direct entries.
+The Meta adapter routes Muse Spark through Meta's stateless OpenAI-compatible
+Responses endpoint. It preserves the provider's `low`/`medium`/`high`/`xhigh`
+reasoning efforts, declares OpenAI-shaped hosted `web_search`, strips unsupported
+OpenAI storage and prompt-cache fields, and intersects Meta's live `/models`
+response with the three curated Muse Spark entries.
 OpenCode Go selects Chat Completions or Messages per model from canonical
 metadata rather than from provider identity alone.
 Wafer AI is a plain OpenAI-compatible Chat Completions provider at

@@ -1,6 +1,6 @@
 # Configuration
 
-Grok reads settings from config files, environment variables, and CLI flags. This page covers the common options.
+Open Grok reads settings from config files, environment variables, and CLI flags. This page covers the common options.
 
 ---
 
@@ -56,6 +56,8 @@ remember_tool_approvals = false        # show per-command "Always allow" options
                                        # grants are remembered per project (default: false); see 22-permissions-and-safety.md
 code_mode = "direct"                   # "direct", "code_mode" (mixed), or "code_mode_only";
                                        # restart Open Grok after changing this setting
+image_generation_provider = "grok"     # "grok" (Imagine) or "openai" (gpt-image-2 via Codex OAuth);
+                                       # restart Open Grok after changing this setting
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # — and finished thoughts among them — into one row (default: true)
@@ -110,6 +112,17 @@ Grok after changing the setting; the running process keeps the configuration it
 loaded at startup. An OpenAI Codex catalog entry that explicitly requires
 `code_mode_only` overrides this preference. Non-Responses models remain in
 direct mode.
+
+#### Image generation provider
+
+`[ui] image_generation_provider` controls both `image_gen` and `image_edit`.
+`"grok"` (default) uses xAI Imagine and xAI credentials. `"openai"` uses
+`gpt-image-2` through the Codex Images API and the isolated
+`~/.opengrok/codex-auth.json` credential; run `open-grok login --codex` first.
+Only ChatGPT account login (OAuth) is eligible — an OpenAI API key cannot be
+used for image generation. Known ChatGPT Free accounts are not eligible.
+Restart Open Grok after changing the setting. Video generation remains
+xAI-only.
 
 #### Input Mode
 
@@ -365,6 +378,30 @@ context_window = 1000000
 For a process-level compatible proxy, set
 `OPENGROK_DEEPSEEK_API_BASE_URL`; UI-stored keys remain restricted to the
 official DeepSeek API host.
+
+Meta API is an API-key-only Responses provider. Export `META_API_KEY`, then
+select one of the bundled `meta:muse-spark-1.2`, `meta:muse-spark-1.1`, or
+`meta:muse-spark-1.2-contributor` entries in `/model`. All three expose
+`low`, `medium`, `high`, and `xhigh` reasoning efforts and Meta's native hosted
+web search. An equivalent explicit model entry is:
+
+```toml
+[model.meta-muse-spark-1-2]
+model = "muse-spark-1.2"
+name = "Muse Spark 1.2"
+provider = "meta"
+base_url = "https://api.meta.ai/v1"
+api_backend = "responses"
+env_key = "META_API_KEY"
+context_window = 1000000
+reasoning_effort = "medium"
+supports_reasoning_effort = true
+supports_backend_search = true
+tool_mode = "direct"
+```
+
+For a process-level compatible proxy, set `OPENGROK_META_API_BASE_URL`. Stored
+provider credentials remain restricted to the official Meta API host.
 
 API-key-only custom providers require an explicit `base_url`; they never
 inherit the xAI endpoint or credentials.

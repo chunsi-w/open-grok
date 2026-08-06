@@ -171,6 +171,14 @@ fn wait_tasks_tool_config() -> ToolConfig {
 fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
+pub(crate) fn collaboration_tool_configs() -> [ToolConfig; 4] {
+    [
+        ToolConfig::from(&grok_build::ListAgentsTool),
+        ToolConfig::from(&grok_build::SendAgentMessageTool),
+        ToolConfig::from(&grok_build::FollowupAgentTaskTool),
+        ToolConfig::from(&grok_build::WaitAgentTool),
+    ]
+}
 /// Complete workspace-executable toolset for hub registration.
 ///
 /// Extends `default_grok_build_toolset()` with tools that are dynamically
@@ -265,29 +273,31 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grok_build_toolset() -> ToolServerConfig {
+    let mut tools = vec![
+        bash_tool_config(),
+        (&grok_build::ReadFileTool).into(),
+        (&grok_build::ViewImageTool).into(),
+        (&grok_build::SearchReplaceTool).into(),
+        (&grok_build::ListDirTool).into(),
+        (&grok_build::GrepTool).into(),
+        kill_task_tool_config(),
+        (&grok_build::TodoWriteTool).into(),
+        task_output_tool_config(),
+        wait_tasks_tool_config(),
+        task_tool_config(),
+        agent_swarm_tool_config(),
+        (&grok_build::SchedulerCreateTool).into(),
+        (&grok_build::SchedulerDeleteTool).into(),
+        (&grok_build::SchedulerListTool).into(),
+        (&grok_build::MonitorTool).into(),
+        (&search_tool::SearchTool).into(),
+        (&use_tool::UseTool).into(),
+        (&grok_build::UpdateGoalTool).into(),
+        (&grok_build::WorkflowTool).into(),
+    ];
+    tools.extend(collaboration_tool_configs());
     ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&grok_build::ReadFileTool).into(),
-            (&grok_build::ViewImageTool).into(),
-            (&grok_build::SearchReplaceTool).into(),
-            (&grok_build::ListDirTool).into(),
-            (&grok_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grok_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            wait_tasks_tool_config(),
-            task_tool_config(),
-            agent_swarm_tool_config(),
-            (&grok_build::SchedulerCreateTool).into(),
-            (&grok_build::SchedulerDeleteTool).into(),
-            (&grok_build::SchedulerListTool).into(),
-            (&grok_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&grok_build::UpdateGoalTool).into(),
-            (&grok_build::WorkflowTool).into(),
-        ],
+        tools,
         behavior_preset: None,
     }
 }

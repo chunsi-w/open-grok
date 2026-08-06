@@ -120,6 +120,15 @@ swarm_mode = false
 - **Live UI:** an active session shows a bold `swarm` footer badge. Swarm children render in one foldable purple card with a pulsing purple accent, fixed input-order tree slots, running/queued/completed/failed/cancelled counts, elapsed time, tool/turn counts, and context usage. Ordinary subagent cards use warm orange identity chrome, while their terminal bullets still turn green or red. Child tracking remains available through the tasks pane and framed transcript view.
 - **Dispatch contract:** pager one-shot submission uses one ordered effect (`swarm_mode_changed` before `session/prompt`). If either send fails before the prompt is accepted, the optimistic turn is rolled back and the draft is restored.
 
+### Image generation provider
+
+`[ui].image_generation_provider = "grok" | "openai"` is exposed as
+**Settings → Models → Image generation** and applies after restart. `grok`
+uses the existing xAI Imagine route and credentials. `openai` mirrors Codex's
+client-side image extension with `gpt-image-2`, the Codex Images endpoints, and
+the isolated `codex-auth.json` bearer/account headers. It is not the hosted
+Responses `image_generation` declaration. Video generation remains xAI-only.
+
 ### Antigravity subagents
 
 ```toml

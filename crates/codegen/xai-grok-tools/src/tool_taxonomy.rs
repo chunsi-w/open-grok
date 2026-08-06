@@ -57,6 +57,7 @@ impl ToolKind {
             ToolKind::MemoryGet => "Memory Read",
             ToolKind::Task => "Subagent",
             ToolKind::AgentSwarm => "Agent Swarm",
+            ToolKind::AgentCollaboration => "Agent Collaboration",
             ToolKind::EnterPlan => "Enter Plan Mode",
             ToolKind::ExitPlan => "Exit Plan Mode",
             ToolKind::AskUser => "Ask User",
@@ -103,6 +104,7 @@ impl ToolKind {
             | ToolKind::Skill
             | ToolKind::Task
             | ToolKind::AgentSwarm
+            | ToolKind::AgentCollaboration
             | ToolKind::ImageGen
             | ToolKind::VideoGen
             | ToolKind::ImageToVideo
