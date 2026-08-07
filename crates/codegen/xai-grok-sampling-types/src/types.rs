@@ -86,6 +86,8 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<crate::rs::ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
 
     /// custom headers
     #[serde(skip)]
@@ -126,6 +128,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            service_tier: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,

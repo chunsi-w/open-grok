@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_file_utils::events::types::CancellationCategory;
 use xai_grok_agent::config::{McpInheritance, ModelOverride, PermissionMode};
+use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_sampling_types::conversation::ConversationItem;
 use xai_grok_subagent_resolution::ResumeSourceData;
 use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
@@ -1074,6 +1075,28 @@ fn resolve_resume_model_route(
         .flatten()
 }
 
+fn reconcile_refreshed_reasoning_effort(
+    model_id: &str,
+    preserved: Option<ReasoningEffort>,
+    launch_default: Option<ReasoningEffort>,
+    refreshed_default: Option<ReasoningEffort>,
+    accepts: impl Fn(ReasoningEffort) -> bool,
+) -> Result<Option<ReasoningEffort>, String> {
+    let refreshed_default = refreshed_default.filter(|effort| accepts(*effort));
+    let Some(preserved) = preserved else {
+        return Ok(refreshed_default);
+    };
+    if accepts(preserved) {
+        return Ok(Some(preserved));
+    }
+    if launch_default == Some(preserved) {
+        return Ok(refreshed_default);
+    }
+    Err(format!(
+        "Model '{model_id}' does not accept reasoning_effort '{preserved}'"
+    ))
+}
+
 /// Re-resolve an API-key provider child's service and credential immediately
 /// before its sampling client is built. Covers Kimi (endpoint + key) and
 /// Fireworks AI (key).
@@ -1141,9 +1164,19 @@ fn refresh_kimi_sampling_config_for_spawn(
             _ => format!("A {provider_name} API key is required before starting this subagent"),
         });
     }
-    if config.reasoning_effort.is_some() {
-        refreshed.reasoning_effort = config.reasoning_effort;
-    }
+    let launch_default =
+        crate::agent::config::find_model_by_id(&ctx.available_models, model_id.0.as_ref())
+            .and_then(|entry| entry.info().reasoning_effort);
+    refreshed.reasoning_effort = reconcile_refreshed_reasoning_effort(
+        model_id.0.as_ref(),
+        config.reasoning_effort,
+        launch_default,
+        refreshed.reasoning_effort,
+        |effort| {
+            ctx.models_manager
+                .model_accepts_reasoning_effort(model_id.0.as_ref(), effort)
+        },
+    )?;
     *config = refreshed;
     Ok(())
 }
@@ -3212,6 +3245,55 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 );
             }
         }
+    }
+}
+#[cfg(test)]
+mod refresh_reasoning_effort_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_supported_explicit_effort_after_refresh() {
+        let effort = reconcile_refreshed_reasoning_effort(
+            "model",
+            Some(ReasoningEffort::High),
+            Some(ReasoningEffort::Low),
+            Some(ReasoningEffort::Medium),
+            |effort| matches!(effort, ReasoningEffort::Medium | ReasoningEffort::High),
+        )
+        .unwrap();
+
+        assert_eq!(effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn clears_stale_inherited_default_for_unsupported_model() {
+        let effort = reconcile_refreshed_reasoning_effort(
+            "model",
+            Some(ReasoningEffort::High),
+            Some(ReasoningEffort::High),
+            Some(ReasoningEffort::High),
+            |_| false,
+        )
+        .unwrap();
+
+        assert_eq!(effort, None);
+    }
+
+    #[test]
+    fn rejects_explicit_effort_removed_by_refresh() {
+        let error = reconcile_refreshed_reasoning_effort(
+            "model",
+            Some(ReasoningEffort::Ultra),
+            Some(ReasoningEffort::High),
+            Some(ReasoningEffort::High),
+            |effort| effort == ReasoningEffort::High,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Model 'model' does not accept reasoning_effort 'ultra'"
+        );
     }
 }
 #[cfg(test)]

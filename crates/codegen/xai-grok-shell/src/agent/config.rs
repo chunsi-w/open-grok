@@ -4650,6 +4650,10 @@ impl ConfigModelOverride {
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
         }
+        if self.supports_reasoning_effort == Some(false) {
+            entry.info.reasoning_effort = None;
+            entry.info.reasoning_efforts.clear();
+        }
         if let Some(v) = self.supports_reasoning_summary_parameter {
             entry.info.supports_reasoning_summary_parameter = v;
         }
@@ -5430,8 +5434,10 @@ fn trusted_built_in_session_endpoint(provider: ModelProvider, base_url: &str) ->
                     && crate::fireworks_models::is_trusted_api_base_url(base_url))
                 || (provider.is_deepseek()
                     && crate::deepseek_models::is_trusted_api_base_url(base_url))
+                || (provider.is_meta() && crate::meta_models::is_trusted_api_base_url(base_url))
                 || (provider.is_open_code_go()
                     && crate::opencode_go_models::is_trusted_api_base_url(base_url))
+                || (provider.is_wafer() && crate::wafer_models::is_trusted_api_base_url(base_url))
         }
         xai_grok_sampling_types::BuiltInSessionAuthKind::XaiSession => {
             crate::util::is_xai_api_bearer_url(base_url)
@@ -6083,7 +6089,11 @@ pub fn sampling_config_for_model(
             .sends_x_grok_headers()
             .then_some(client_version)
             .flatten(),
-        reasoning_effort: info.reasoning_effort,
+        reasoning_effort: if info.supports_reasoning_effort {
+            info.reasoning_effort
+        } else {
+            None
+        },
         service_tier: None,
         reasoning_summary: model_reasoning_summary(info),
         force_http1: false,
@@ -7402,6 +7412,56 @@ reasoning_effort = "low"
         assert_eq!(explicit.auth_type, xai_chat_state::AuthType::ApiKey);
         assert_eq!(explicit.api_key.as_deref(), Some("endpoint-owned-key"));
         assert_eq!(explicit.base_url, "https://vendor.example/v1");
+    }
+
+    #[test]
+    #[serial]
+    fn stored_meta_and_wafer_keys_resolve_only_on_trusted_hosts() {
+        use crate::auth::store_provider_api_key;
+
+        let home = tempfile::tempdir().expect("temp OPENGROK_HOME");
+        let _env = EnvGuard::set("OPENGROK_HOME", home.path());
+        store_provider_api_key(home.path(), ModelProvider::Meta, "meta-stored-secret")
+            .expect("store Meta key");
+        store_provider_api_key(home.path(), ModelProvider::Wafer, "wafer-stored-secret")
+            .expect("store Wafer key");
+
+        let mut meta = test_model_entry(
+            "meta:muse-spark-1.2",
+            crate::meta_models::META_API_BASE_URL,
+            None,
+            None,
+            None,
+        );
+        meta.info.provider = ModelProvider::Meta;
+        meta.info.api_backend = ApiBackend::Responses;
+        meta.env_key = Some(EnvKeys::single(crate::meta_models::META_API_KEY_ENV));
+        let meta_creds = resolve_credentials(&meta, None);
+        assert_eq!(meta_creds.api_key.as_deref(), Some("meta-stored-secret"));
+        assert!(meta.has_usable_provider_credentials());
+
+        let mut meta_proxy = meta.clone();
+        meta_proxy.info.base_url = "https://proxy.example/v1".to_owned();
+        assert!(resolve_credentials(&meta_proxy, None).api_key.is_none());
+        assert!(!meta_proxy.has_usable_provider_credentials());
+
+        let mut wafer = test_model_entry(
+            "wafer:example",
+            crate::wafer_models::WAFER_API_BASE_URL,
+            None,
+            None,
+            None,
+        );
+        wafer.info.provider = ModelProvider::Wafer;
+        wafer.env_key = Some(EnvKeys::single(crate::wafer_models::WAFER_API_KEY_ENV));
+        let wafer_creds = resolve_credentials(&wafer, None);
+        assert_eq!(wafer_creds.api_key.as_deref(), Some("wafer-stored-secret"));
+        assert!(wafer.has_usable_provider_credentials());
+
+        let mut wafer_proxy = wafer.clone();
+        wafer_proxy.info.base_url = "https://proxy.example/v1".to_owned();
+        assert!(resolve_credentials(&wafer_proxy, None).api_key.is_none());
+        assert!(!wafer_proxy.has_usable_provider_credentials());
     }
 
     #[test]
@@ -8871,6 +8931,93 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
+    }
+    #[test]
+    fn reasoning_effort_override_supported_values_reach_sampler() {
+        let endpoints = EndpointsConfig::default();
+        let base = test_model_entry(
+            "reasoning-model",
+            "https://api.example.com/v1",
+            None,
+            None,
+            None,
+        );
+        let model = ConfigModelOverride {
+            reasoning_effort: Some(ReasoningEffort::High),
+            supports_reasoning_effort: Some(true),
+            reasoning_efforts: vec![ReasoningEffortOption {
+                id: "high".to_owned(),
+                value: ReasoningEffort::High,
+                label: "High".to_owned(),
+                description: None,
+                default: true,
+            }],
+            ..Default::default()
+        }
+        .apply("reasoning-model", Some(base), &endpoints);
+
+        assert!(model.info.supports_reasoning_effort);
+        assert_eq!(model.info.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(model.info.reasoning_efforts.len(), 1);
+        let sampling_config = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            sampling_config.reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+    }
+    #[test]
+    fn reasoning_effort_override_false_clears_conflicting_values() {
+        let endpoints = EndpointsConfig::default();
+        let mut base = test_model_entry(
+            "plain-model",
+            "https://api.example.com/v1",
+            None,
+            None,
+            None,
+        );
+        base.info.supports_reasoning_effort = true;
+        base.info.reasoning_effort = Some(ReasoningEffort::Low);
+        base.info.reasoning_efforts = vec![ReasoningEffortOption {
+            id: "low".to_owned(),
+            value: ReasoningEffort::Low,
+            label: "Low".to_owned(),
+            description: None,
+            default: true,
+        }];
+        let mut model = ConfigModelOverride {
+            reasoning_effort: Some(ReasoningEffort::High),
+            supports_reasoning_effort: Some(false),
+            reasoning_efforts: vec![ReasoningEffortOption {
+                id: "high".to_owned(),
+                value: ReasoningEffort::High,
+                label: "High".to_owned(),
+                description: None,
+                default: true,
+            }],
+            ..Default::default()
+        }
+        .apply("plain-model", Some(base), &endpoints);
+        model.info.derive_reasoning_effort_fields();
+
+        assert!(!model.info.supports_reasoning_effort);
+        assert_eq!(model.info.reasoning_effort, None);
+        assert!(model.info.reasoning_efforts.is_empty());
+        let sampling_config = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampling_config.reasoning_effort, None);
     }
     #[test]
     fn parses_model_use_concise_true() {

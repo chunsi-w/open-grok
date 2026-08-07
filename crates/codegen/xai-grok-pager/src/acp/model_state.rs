@@ -11,6 +11,17 @@ use xai_grok_shell::sampling::types::{
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
 
+fn reasoning_effort_for_model(
+    model: Option<&acp::ModelInfo>,
+    requested: Option<ReasoningEffort>,
+) -> Option<ReasoningEffort> {
+    let model = model?;
+    if !supports_reasoning_effort_meta(model.meta.as_ref()) {
+        return None;
+    }
+    requested.or_else(|| parse_reasoning_effort_meta(model.meta.as_ref()))
+}
+
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
 /// the same input identically and differ only in how they surface the error.
@@ -155,17 +166,24 @@ impl ModelState {
         // not this session's choice; only re-derive when the model changed so a
         // catalog refresh can't clobber a user-set effort.
         if self.current != previous_current_model {
-            self.reasoning_effort = self
-                .current
-                .as_ref()
-                .and_then(|id| self.available.get(id))
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+            self.reasoning_effort = reasoning_effort_for_model(
+                self.current.as_ref().and_then(|id| self.available.get(id)),
+                None,
+            );
             // Drop a previously selected tier when the new model cannot run it.
             if let Some(tier) = self.service_tier.clone()
                 && !self.current_supports_service_tier(&tier)
             {
                 self.service_tier = None;
             }
+        } else if !self
+            .current
+            .as_ref()
+            .and_then(|id| self.available.get(id))
+            .map(|info| supports_reasoning_effort_meta(info.meta.as_ref()))
+            .unwrap_or(false)
+        {
+            self.reasoning_effort = None;
         }
     }
 
@@ -176,11 +194,8 @@ impl ModelState {
         effort_override: Option<ReasoningEffort>,
     ) {
         self.current = Some(model_id.clone());
-        self.reasoning_effort = effort_override.or_else(|| {
-            self.available
-                .get(&model_id)
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()))
-        });
+        self.reasoning_effort =
+            reasoning_effort_for_model(self.available.get(&model_id), effort_override);
         if let Some(tier) = self.service_tier.clone()
             && !self
                 .available
@@ -392,10 +407,10 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                 let current_model = models
                     .contains_key(&state.current_model_id)
                     .then_some(state.current_model_id);
-                let reasoning_effort = current_model
-                    .as_ref()
-                    .and_then(|id| models.get(id))
-                    .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+                let reasoning_effort = reasoning_effort_for_model(
+                    current_model.as_ref().and_then(|id| models.get(id)),
+                    None,
+                );
                 Self {
                     available: models,
                     current: current_model,
@@ -469,6 +484,68 @@ mod tests {
         )
     }
 
+    fn model_with_effort_and_fast(id: &str, name: &str, effort: &str) -> acp::ModelInfo {
+        acp::ModelInfo::new(acp::ModelId::new(Arc::from(id)), name.to_string()).meta(
+            serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffort": effort,
+                "serviceTiers": [
+                    { "id": "priority", "name": "Fast" },
+                ],
+            })
+            .as_object()
+            .cloned(),
+        )
+    }
+
+    #[test]
+    fn set_current_clears_requested_effort_for_non_reasoning_model() {
+        let reasoning_id = acp::ModelId::new(Arc::from("reasoning-model"));
+        let non_reasoning_id = acp::ModelId::new(Arc::from("non-reasoning-model"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            reasoning_id.clone(),
+            model_with_effort("reasoning-model", "Reasoning Model", "high"),
+        );
+        state.available.insert(
+            non_reasoning_id.clone(),
+            acp::ModelInfo::new(non_reasoning_id.clone(), "Non-Reasoning Model".to_string()),
+        );
+        state.set_current(reasoning_id, Some(ReasoningEffort::Xhigh));
+
+        state.set_current(non_reasoning_id.clone(), Some(ReasoningEffort::Xhigh));
+
+        assert_eq!(state.current, Some(non_reasoning_id));
+        assert_eq!(state.reasoning_effort, None);
+    }
+
+    #[test]
+    fn set_current_preserves_supported_effort_and_fast_mode() {
+        let first_id = acp::ModelId::new(Arc::from("reasoning-model-a"));
+        let second_id = acp::ModelId::new(Arc::from("reasoning-model-b"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            first_id.clone(),
+            model_with_effort_and_fast("reasoning-model-a", "Reasoning Model A", "high"),
+        );
+        state.available.insert(
+            second_id.clone(),
+            model_with_effort_and_fast("reasoning-model-b", "Reasoning Model B", "medium"),
+        );
+        state.set_current(first_id, Some(ReasoningEffort::High));
+        state.set_service_tier(Some(SERVICE_TIER_FAST_REQUEST_VALUE.to_string()));
+        assert!(state.fast_mode_enabled());
+
+        state.set_current(second_id, Some(ReasoningEffort::Xhigh));
+
+        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(
+            state.service_tier.as_deref(),
+            Some(SERVICE_TIER_FAST_REQUEST_VALUE)
+        );
+        assert!(state.fast_mode_enabled());
+    }
+
     #[test]
     fn update_catalog_preserves_user_effort_when_model_unchanged() {
         let id = acp::ModelId::new(Arc::from("grok-build"));
@@ -493,6 +570,31 @@ mod tests {
             Some(ReasoningEffort::Xhigh),
             "catalog refresh must not clobber a user-set per-session effort"
         );
+    }
+
+    #[test]
+    fn update_catalog_clears_user_effort_when_same_model_loses_support() {
+        let id = acp::ModelId::new(Arc::from("shared-model-id"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            id.clone(),
+            model_with_effort("shared-model-id", "Reasoning Provider Model", "high"),
+        );
+        state.set_current(id.clone(), Some(ReasoningEffort::Xhigh));
+
+        let mut refreshed = IndexMap::new();
+        refreshed.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Non-Reasoning Provider Model".to_string()).meta(
+                serde_json::json!({ "reasoningEffort": "high" })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        state.update_catalog(refreshed, Some(id.clone()));
+
+        assert_eq!(state.current, Some(id));
+        assert_eq!(state.reasoning_effort, None);
     }
 
     #[test]

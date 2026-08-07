@@ -23,6 +23,77 @@ fn records_model_tool_results() -> bool {
         .try_with(|sink| *sink == ModelToolResultSink::Conversation)
         .unwrap_or(true)
 }
+
+std::thread_local! {
+    static INFERENCE_ATTEMPT_COUNTS: std::cell::RefCell<std::collections::HashMap<String, InferenceAttemptState>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(Default)]
+struct InferenceAttemptState {
+    attempt_count: u32,
+    retry_pending: bool,
+}
+
+fn note_inference_stream_started(request_id: &str) {
+    INFERENCE_ATTEMPT_COUNTS.with(|attempts| {
+        let mut attempts = attempts.borrow_mut();
+        let state = attempts.entry(request_id.to_owned()).or_default();
+        state.attempt_count = state.attempt_count.max(1);
+        state.retry_pending = false;
+    });
+}
+
+fn note_inference_retry(request_id: &str, retry_attempt: u32) -> u32 {
+    let attempt_count = retry_attempt.saturating_add(1);
+    INFERENCE_ATTEMPT_COUNTS.with(|attempts| {
+        let mut attempts = attempts.borrow_mut();
+        let state = attempts.entry(request_id.to_owned()).or_default();
+        state.attempt_count = state.attempt_count.max(attempt_count);
+        state.retry_pending = true;
+    });
+    attempt_count
+}
+
+fn finish_inference_request(request_id: &str, include_pending_retry: bool) -> u32 {
+    INFERENCE_ATTEMPT_COUNTS
+        .with(|attempts| attempts.borrow_mut().remove(request_id))
+        .map(|state| {
+            if state.retry_pending && !include_pending_retry {
+                state.attempt_count.saturating_sub(1)
+            } else {
+                state.attempt_count
+            }
+        })
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn retry_status_code(kind: xai_grok_sampler::SamplingErrorKind, reason: &str) -> Option<u16> {
+    reason
+        .strip_prefix("API error (status ")
+        .and_then(|rest| rest.split_once(')'))
+        .and_then(|(status, _)| status.split_whitespace().next())
+        .and_then(|status| status.parse().ok())
+        .or_else(|| (kind == xai_grok_sampler::SamplingErrorKind::RateLimited).then_some(429))
+}
+
+fn inference_route_log_fields(
+    config: Option<&xai_grok_sampling_types::SamplingConfig>,
+    resolved_model_id: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::json!({
+        "provider": config.map(|config| config.provider.as_str()),
+        "model_raw": config.map(|config| config.model.as_str()),
+        "resolved_model_id": resolved_model_id,
+        "api_backend": config.map(|config| config.api_backend),
+        "reasoning_effort": config.and_then(|config| config.reasoning_effort.map(|effort| effort.as_str())),
+        "service_tier": config.and_then(|config| config.service_tier.as_deref()),
+    })
+    .as_object()
+    .cloned()
+    .expect("inference telemetry fields must serialize as an object")
+}
 /// Whether a tool name is an MCP `create_pull_request` (qualified
 /// `server__create_pull_request` or bare).
 fn is_mcp_create_pull_request(tool_name: &str) -> bool {
@@ -3007,7 +3078,11 @@ impl SessionActor {
     ) {
         use xai_grok_sampler::{SamplingChannel, SamplingEvent};
         match event {
-            SamplingEvent::StreamStarted { timestamp_ms, .. } => {
+            SamplingEvent::StreamStarted {
+                request_id,
+                timestamp_ms,
+            } => {
+                note_inference_stream_started(request_id.as_str());
                 {
                     let prompt_id = self
                         .current_prompt_id
@@ -3121,8 +3196,11 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Completed {
-                response, metrics, ..
+                request_id,
+                response,
+                metrics,
             } => {
+                finish_inference_request(request_id.as_str(), true);
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
@@ -3169,6 +3247,7 @@ impl SessionActor {
                 doom_loop_triggers,
                 doom_loop_aborted_at_chunk,
             } => {
+                let attempt_count = note_inference_retry(request_id.as_str(), attempt);
                 if kind == xai_grok_sampler::SamplingErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
                     let attempt_number = {
@@ -3188,16 +3267,41 @@ impl SessionActor {
                     self.signals_handle()
                         .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
                 }
+                let (sampling_config, model_metadata) = tokio::join!(
+                    self.chat_state_handle.get_sampling_config(),
+                    self.chat_state_handle.get_last_model_metadata(),
+                );
+                let mut fields = inference_route_log_fields(
+                    sampling_config.as_ref(),
+                    model_metadata.resolved_model_id.as_deref(),
+                );
+                fields.insert(
+                    "sampler_request_id".to_string(),
+                    serde_json::Value::String(request_id.as_str().to_owned()),
+                );
+                fields.insert("attempt".to_string(), serde_json::json!(attempt));
+                fields.insert(
+                    "attempt_count".to_string(),
+                    serde_json::json!(attempt_count),
+                );
+                fields.insert("max_retries".to_string(), serde_json::json!(max_retries));
+                fields.insert(
+                    "kind".to_string(),
+                    serde_json::Value::String(kind.as_str().to_owned()),
+                );
+                fields.insert(
+                    "status_code".to_string(),
+                    serde_json::json!(retry_status_code(kind, &reason)),
+                );
+                fields.insert("is_retryable".to_string(), serde_json::Value::Bool(true));
+                fields.insert(
+                    "reason".to_string(),
+                    serde_json::Value::String(crate::util::truncate(&reason, 300).to_owned()),
+                );
                 xai_grok_telemetry::unified_log::warn(
                     "shell.turn.inference_retry",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "attempt": attempt,
-                        "max_retries": max_retries,
-                        "kind": kind.as_str(),
-                        "reason": crate::util::truncate(&reason, 300),
-                    })),
+                    Some(serde_json::Value::Object(fields)),
                 );
                 self.send_xai_notification(XaiSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Retrying {
@@ -3209,16 +3313,52 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
+                let attempt_count = finish_inference_request(
+                    request_id.as_str(),
+                    error.message != "request cancelled",
+                );
+                let (sampling_config, model_metadata) = tokio::join!(
+                    self.chat_state_handle.get_sampling_config(),
+                    self.chat_state_handle.get_last_model_metadata(),
+                );
+                let mut fields = inference_route_log_fields(
+                    sampling_config.as_ref(),
+                    model_metadata.resolved_model_id.as_deref(),
+                );
+                fields.insert(
+                    "sampler_request_id".to_string(),
+                    serde_json::Value::String(request_id.as_str().to_owned()),
+                );
+                fields.insert(
+                    "attempt_count".to_string(),
+                    serde_json::json!(attempt_count),
+                );
+                fields.insert(
+                    "kind".to_string(),
+                    serde_json::Value::String(error.kind.as_str().to_owned()),
+                );
+                fields.insert(
+                    "status_code".to_string(),
+                    serde_json::json!(error.status_code),
+                );
+                fields.insert(
+                    "is_retryable".to_string(),
+                    serde_json::Value::Bool(error.is_retryable),
+                );
+                fields.insert(
+                    "should_retry".to_string(),
+                    serde_json::json!(error.should_retry),
+                );
+                fields.insert(
+                    "message".to_string(),
+                    serde_json::Value::String(
+                        crate::util::truncate(&error.message, 300).to_owned(),
+                    ),
+                );
                 xai_grok_telemetry::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "kind": error.kind.as_str(),
-                        "status_code": error.status_code,
-                        "is_retryable": error.is_retryable,
-                        "message": crate::util::truncate(&error.message, 300),
-                    })),
+                    Some(serde_json::Value::Object(fields)),
                 );
                 self.signals_handle()
                     .record_error_typed(error.kind.as_str());
@@ -3721,6 +3861,112 @@ mod plan_mode_edit_gate_tests {
         );
     }
 }
+#[cfg(test)]
+mod inference_telemetry_tests {
+    use super::{
+        finish_inference_request, inference_route_log_fields, note_inference_retry,
+        note_inference_stream_started, retry_status_code,
+    };
+    use xai_grok_sampler::SamplingErrorKind;
+    use xai_grok_sampling_types::{ApiBackend, ModelProvider, ReasoningEffort, SamplingConfig};
+
+    #[test]
+    fn route_fields_include_only_sanitized_inference_metadata() {
+        let mut config = SamplingConfig {
+            base_url: "https://provider.example/v1".to_string(),
+            model: "accounts/example/models/raw-model".to_string(),
+            max_completion_tokens: Some(4096),
+            temperature: None,
+            top_p: None,
+            api_backend: ApiBackend::Responses,
+            provider: ModelProvider::Fireworks,
+            extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+            reasoning_effort: Some(ReasoningEffort::High),
+            service_tier: Some("priority".to_string()),
+            stream_tool_calls: None,
+        };
+        config.extra_headers.insert(
+            "Authorization".to_string(),
+            "Bearer must-not-log".to_string(),
+        );
+
+        let fields = inference_route_log_fields(Some(&config), Some("resolved-model"));
+
+        assert_eq!(fields["provider"], "fireworks");
+        assert_eq!(fields["model_raw"], "accounts/example/models/raw-model");
+        assert_eq!(fields["resolved_model_id"], "resolved-model");
+        assert_eq!(fields["api_backend"], "responses");
+        assert_eq!(fields["reasoning_effort"], "high");
+        assert_eq!(fields["service_tier"], "priority");
+        assert!(!fields.contains_key("base_url"));
+        assert!(!fields.contains_key("extra_headers"));
+        assert!(!fields.contains_key("query_params"));
+        assert!(!fields.contains_key("env_http_headers"));
+        assert!(
+            !serde_json::Value::Object(fields)
+                .to_string()
+                .contains("must-not-log")
+        );
+    }
+
+    #[test]
+    fn retry_status_extracts_only_known_http_statuses() {
+        assert_eq!(
+            retry_status_code(
+                SamplingErrorKind::Api,
+                "API error (status 503 Service Unavailable): upstream unavailable"
+            ),
+            Some(503)
+        );
+        assert_eq!(
+            retry_status_code(
+                SamplingErrorKind::Api,
+                "API error (status 503): upstream unavailable"
+            ),
+            Some(503)
+        );
+        assert_eq!(
+            retry_status_code(SamplingErrorKind::RateLimited, "rate limited"),
+            Some(429)
+        );
+        assert_eq!(
+            retry_status_code(SamplingErrorKind::Http, "request error: private detail"),
+            None
+        );
+    }
+
+    #[test]
+    fn attempt_count_tracks_retries_and_cleans_up_terminal_requests() {
+        let request_id = "telemetry-attempt-test";
+        let _ = finish_inference_request(request_id, true);
+
+        note_inference_stream_started(request_id);
+        assert_eq!(note_inference_retry(request_id, 1), 2);
+        note_inference_stream_started(request_id);
+        assert_eq!(note_inference_retry(request_id, 2), 3);
+        assert_eq!(finish_inference_request(request_id, true), 3);
+        assert_eq!(finish_inference_request(request_id, true), 1);
+    }
+
+    #[test]
+    fn cancellation_does_not_count_a_retry_still_in_backoff() {
+        let request_id = "telemetry-cancelled-retry-test";
+        let _ = finish_inference_request(request_id, true);
+
+        note_inference_stream_started(request_id);
+        assert_eq!(note_inference_retry(request_id, 1), 2);
+        assert_eq!(finish_inference_request(request_id, false), 1);
+
+        note_inference_stream_started(request_id);
+        assert_eq!(note_inference_retry(request_id, 1), 2);
+        note_inference_stream_started(request_id);
+        assert_eq!(finish_inference_request(request_id, false), 2);
+    }
+}
+
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{

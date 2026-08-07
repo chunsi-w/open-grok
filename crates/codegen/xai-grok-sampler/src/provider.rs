@@ -335,6 +335,7 @@ impl ProviderAdapter for KimiProvider {
         request.top_p = None;
         request.frequency_penalty = None;
         request.presence_penalty = None;
+        request.service_tier = None;
     }
 }
 
@@ -350,6 +351,7 @@ impl ProviderAdapter for FireworksProvider {
     }
 
     fn sanitize_chat_request(&self, request: &mut ChatCompletionRequest) {
+        request.reasoning_effort = None;
         // Fireworks validates the chat schema strictly and rejects the whole
         // request with 400 "Extra inputs are not permitted" when a replayed
         // assistant message still carries Open Grok's internal per-message
@@ -381,6 +383,7 @@ impl ProviderAdapter for DeepSeekProvider {
         for message in &mut request.messages {
             message.model_id = None;
         }
+        request.service_tier = None;
     }
 }
 
@@ -405,6 +408,7 @@ impl ProviderAdapter for OpenCodeGoProvider {
         for message in &mut request.messages {
             message.model_id = None;
         }
+        request.service_tier = None;
     }
 }
 
@@ -418,6 +422,8 @@ impl ProviderAdapter for WaferProvider {
     }
 
     fn sanitize_chat_request(&self, request: &mut ChatCompletionRequest) {
+        request.reasoning_effort = None;
+        request.service_tier = None;
         for message in &mut request.messages {
             message.model_id = None;
         }
@@ -709,12 +715,15 @@ fn patch_deepseek_responses_request(request_body: &mut Value, policy: ResponsesR
 }
 
 fn patch_meta_responses_request(request_body: &mut Value) {
-    request_body.as_object_mut().map(|body| {
+    if let Some(body) = request_body.as_object_mut() {
         body.remove("include");
         body.remove("prompt_cache_key");
         body.remove("prompt_cache_retention");
         body.remove("store");
-    });
+        if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+            input.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+        }
+    }
     if let Some(reasoning) = request_body
         .get_mut("reasoning")
         .and_then(Value::as_object_mut)
@@ -1040,7 +1049,14 @@ mod tests {
     fn meta_responses_preserves_supported_effort_and_drops_unsupported_state() {
         for effort in ["low", "medium", "high", "xhigh"] {
             let mut request = serde_json::json!({
-                "input": [],
+                "input": [
+                    {"type": "message", "role": "user", "content": "first question"},
+                    {"type": "reasoning", "id": "reasoning_1", "summary": [{"type": "summary_text", "text": "transient"}]},
+                    {"type": "message", "role": "assistant", "content": "first answer"},
+                    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"key\":\"value\"}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+                    {"type": "message", "role": "user", "content": "follow-up"}
+                ],
                 "include": ["reasoning.encrypted_content"],
                 "prompt_cache_key": "must-not-send",
                 "prompt_cache_retention": "24h",
@@ -1055,6 +1071,18 @@ mod tests {
             assert!(request.get("prompt_cache_key").is_none());
             assert!(request.get("prompt_cache_retention").is_none());
             assert!(request.get("store").is_none());
+            let input = request["input"].as_array().expect("input array");
+            assert_eq!(input.len(), 5);
+            assert!(
+                input
+                    .iter()
+                    .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
+            );
+            assert_eq!(input[0]["role"], "user");
+            assert_eq!(input[1]["role"], "assistant");
+            assert_eq!(input[2]["type"], "function_call");
+            assert_eq!(input[3]["type"], "function_call_output");
+            assert_eq!(input[4]["role"], "user");
         }
     }
 
@@ -1064,9 +1092,13 @@ mod tests {
             ChatCompletionRequest::new("accounts/fireworks/models/glm-5p2", Vec::new());
         request.temperature = Some(0.7);
         request.top_p = Some(0.95);
+        request.reasoning_effort = Some(ReasoningEffort::High);
+        request.service_tier = Some("priority".to_owned());
         provider_adapter(ModelProvider::Fireworks).sanitize_chat_request(&mut request);
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.top_p, Some(0.95));
+        assert_eq!(request.reasoning_effort, None);
+        assert_eq!(request.service_tier.as_deref(), Some("priority"));
     }
 
     #[test]
@@ -1077,6 +1109,8 @@ mod tests {
         let mut request = ChatCompletionRequest::new("wafer-model", vec![assistant]);
         request.temperature = Some(0.7);
         request.top_p = Some(0.95);
+        request.reasoning_effort = Some(ReasoningEffort::High);
+        request.service_tier = Some("priority".to_owned());
         request.tools = Some(vec![ToolDefinition::function(
             "lookup",
             Some("Look up a value"),
@@ -1097,6 +1131,8 @@ mod tests {
         );
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.top_p, Some(0.95));
+        assert_eq!(request.reasoning_effort, None);
+        assert_eq!(request.service_tier, None);
         let wire = serde_json::to_value(&request).expect("serializes");
         assert!(wire["messages"][0].get("model_id").is_none());
         assert_eq!(wire["tools"][0]["type"], "function");

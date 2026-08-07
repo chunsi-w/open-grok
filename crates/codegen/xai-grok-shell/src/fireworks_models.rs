@@ -12,7 +12,10 @@ use serde::Deserialize;
 use std::num::NonZeroU64;
 use std::time::Duration;
 use url::Url;
-use xai_grok_sampling_types::{ApiBackend, ModelProvider, ToolMode};
+use xai_grok_sampling_types::{
+    ApiBackend, ModelProvider, ModelServiceTier, ReasoningEffort, ReasoningEffortOption,
+    SERVICE_TIER_FAST_REQUEST_VALUE, ToolMode,
+};
 
 pub const FIREWORKS_API_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 pub const FIREWORKS_API_BASE_URL_ENV: &str = "OPENGROK_FIREWORKS_API_BASE_URL";
@@ -158,9 +161,14 @@ fn curated_model_entry(
         .and_then(NonZeroU64::new)
         .or_else(|| NonZeroU64::new(curated.fallback_context_window))
         .expect("non-zero Fireworks fallback context window");
-    info.supports_reasoning_effort = false;
-    info.reasoning_efforts.clear();
-    info.reasoning_effort = None;
+    info.supports_reasoning_effort = true;
+    info.reasoning_efforts = fireworks_reasoning_efforts();
+    info.reasoning_effort = Some(ReasoningEffort::Medium);
+    info.service_tiers = vec![ModelServiceTier {
+        id: SERVICE_TIER_FAST_REQUEST_VALUE.to_owned(),
+        name: "Fast".to_owned(),
+        description: Some("Fireworks priority processing".to_owned()),
+    }];
     info.supported_in_api = true;
     ModelEntry {
         info,
@@ -169,6 +177,23 @@ fn curated_model_entry(
         auth_provider: None,
         api_base_url: None,
     }
+}
+
+fn fireworks_reasoning_efforts() -> Vec<ReasoningEffortOption> {
+    [
+        (ReasoningEffort::Low, "Low", false),
+        (ReasoningEffort::Medium, "Medium", true),
+        (ReasoningEffort::High, "High", false),
+    ]
+    .into_iter()
+    .map(|(value, label, default)| ReasoningEffortOption {
+        id: value.as_str().to_owned(),
+        value,
+        label: label.to_owned(),
+        description: None,
+        default,
+    })
+    .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -374,8 +399,23 @@ mod tests {
                 entry.info.context_window.get(),
                 curated.fallback_context_window
             );
-            assert!(!entry.info.supports_reasoning_effort);
-            assert!(entry.info.reasoning_efforts.is_empty());
+            assert!(entry.info.supports_reasoning_effort);
+            assert_eq!(entry.info.reasoning_effort, Some(ReasoningEffort::Medium));
+            assert_eq!(
+                entry
+                    .info
+                    .reasoning_efforts
+                    .iter()
+                    .map(|option| option.value)
+                    .collect::<Vec<_>>(),
+                vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ]
+            );
+            assert_eq!(entry.info.service_tiers.len(), 1);
+            assert!(entry.info.service_tiers[0].is_fast());
             assert_eq!(
                 entry.env_key.as_ref().and_then(EnvKeys::primary),
                 Some(FIREWORKS_API_KEY_ENV)
@@ -384,12 +424,16 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_variants_use_fireworks_model_and_router_paths() {
+    fn fast_variants_use_distinct_fireworks_router_paths_with_priority_tier() {
         let client = FireworksModelsClient::with_base_url(FIREWORKS_API_BASE_URL);
         let entries = client
             .catalog_from_wire(FireworksModelsResponse { data: Vec::new() }, "catalog-key")
             .entries();
 
+        assert_eq!(
+            entries["glm-5.2-fast"].info.model,
+            "accounts/fireworks/routers/glm-5p2-fast"
+        );
         assert_eq!(
             entries["fireworks:kimi-k3"].info.model,
             "accounts/fireworks/models/kimi-k3"
@@ -398,6 +442,8 @@ mod tests {
             entries["fireworks:kimi-k3-fast"].info.model,
             "accounts/fireworks/routers/kimi-k3-fast"
         );
+        assert!(entries["glm-5.2-fast"].info.service_tiers[0].is_fast());
+        assert!(entries["fireworks:kimi-k3-fast"].info.service_tiers[0].is_fast());
     }
 
     #[test]

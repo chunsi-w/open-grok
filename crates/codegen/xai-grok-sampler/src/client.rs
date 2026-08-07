@@ -21,6 +21,7 @@ use reqwest::header::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[cfg(test)]
 use xai_grok_sampling_types::ReasoningEffort;
@@ -55,6 +56,31 @@ const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 const X_CODEX_BETA_FEATURES_HEADER: &str = "x-codex-beta-features";
 const REMOTE_COMPACTION_V2_FEATURE: &str = "remote_compaction_v2";
+const FIREWORKS_MAX_CONCURRENT_REQUESTS: usize = 2;
+
+static FIREWORKS_REQUEST_GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn fireworks_request_gate() -> Arc<Semaphore> {
+    Arc::clone(
+        FIREWORKS_REQUEST_GATE
+            .get_or_init(|| Arc::new(Semaphore::new(FIREWORKS_MAX_CONCURRENT_REQUESTS))),
+    )
+}
+
+async fn acquire_provider_request_permit_from(
+    provider: ModelProvider,
+    fireworks_gate: Arc<Semaphore>,
+) -> Option<OwnedSemaphorePermit> {
+    if provider != ModelProvider::Fireworks {
+        return None;
+    }
+    Some(
+        fireworks_gate
+            .acquire_owned()
+            .await
+            .expect("Fireworks request gate is never closed"),
+    )
+}
 
 /// Parse the `Retry-After` response header as delta-seconds.
 /// Our inference backends only emit integer seconds (never HTTP-date),
@@ -1677,6 +1703,10 @@ impl SamplingClient {
         self.endpoint.url_for_path(path)
     }
 
+    async fn acquire_provider_request_permit(&self) -> Option<OwnedSemaphorePermit> {
+        acquire_provider_request_permit_from(self.defaults.provider, fireworks_request_gate()).await
+    }
+
     /// Execute the provider-local Codex-compatible standalone search endpoint.
     ///
     /// Requests use the same endpoint template, live bearer resolver, private
@@ -1773,7 +1803,18 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        if request.service_tier.is_none() {
+            request.service_tier = self.defaults.service_tier.clone();
+        }
+
+        let fireworks_reasoning_effort = (self.defaults.provider == ModelProvider::Fireworks)
+            .then_some(self.defaults.reasoning_effort)
+            .flatten()
+            .map(|default| request.reasoning_effort.unwrap_or(default));
         self.provider_adapter.sanitize_chat_request(&mut request);
+        if let Some(reasoning_effort) = fireworks_reasoning_effort {
+            request.reasoning_effort = Some(reasoning_effort);
+        }
 
         Ok(request)
     }
@@ -1834,6 +1875,7 @@ impl SamplingClient {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
         let payload = self.apply_defaults(request)?;
+        let _provider_request_permit = self.acquire_provider_request_permit().await;
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -1892,6 +1934,7 @@ impl SamplingClient {
         Option<ResponseModelMetadata>,
     )> {
         let payload = self.apply_defaults(request)?;
+        let provider_request_permit = self.acquire_provider_request_permit().await;
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -2050,6 +2093,10 @@ impl SamplingClient {
                     }
                 };
                 std::future::ready(item)
+            })
+            .map(move |item| {
+                let _keep_permit_until_stream_drop = &provider_request_permit;
+                item
             })
             .boxed();
 
@@ -4018,6 +4065,7 @@ mod tests {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            service_tier: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -4138,6 +4186,74 @@ mod tests {
     fn new_with_minimal_config_succeeds() {
         let client = SamplingClient::new(minimal_config()).expect("client should construct");
         assert_eq!(client.api_backend(), ApiBackend::ChatCompletions);
+    }
+
+    #[tokio::test]
+    async fn fireworks_request_gate_is_provider_local_and_bounded() {
+        let gate = Arc::new(Semaphore::new(FIREWORKS_MAX_CONCURRENT_REQUESTS));
+
+        assert!(
+            acquire_provider_request_permit_from(ModelProvider::Xai, Arc::clone(&gate))
+                .await
+                .is_none()
+        );
+        assert_eq!(gate.available_permits(), FIREWORKS_MAX_CONCURRENT_REQUESTS);
+
+        let first =
+            acquire_provider_request_permit_from(ModelProvider::Fireworks, Arc::clone(&gate))
+                .await
+                .expect("first Fireworks permit");
+        let second =
+            acquire_provider_request_permit_from(ModelProvider::Fireworks, Arc::clone(&gate))
+                .await
+                .expect("second Fireworks permit");
+        assert_eq!(gate.available_permits(), 0);
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            acquire_provider_request_permit_from(ModelProvider::Fireworks, Arc::clone(&gate)),
+        )
+        .await;
+        assert!(blocked.is_err(), "a third Fireworks request must wait");
+
+        drop(first);
+        let third = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            acquire_provider_request_permit_from(ModelProvider::Fireworks, Arc::clone(&gate)),
+        )
+        .await
+        .expect("released permit should wake the waiter")
+        .expect("third Fireworks permit");
+        drop((second, third));
+    }
+
+    #[test]
+    fn fireworks_reasoning_requires_explicit_model_support() {
+        let mut supported_config = minimal_config();
+        supported_config.provider = ModelProvider::Fireworks;
+        supported_config.model = "accounts/fireworks/routers/kimi-k3-fast".to_owned();
+        supported_config.reasoning_effort = Some(ReasoningEffort::High);
+        supported_config.service_tier = Some("priority".to_owned());
+        let supported = SamplingClient::new(supported_config).expect("Fireworks client");
+        let mut supported_input =
+            ChatCompletionRequest::new("accounts/fireworks/routers/kimi-k3-fast", Vec::new());
+        supported_input.reasoning_effort = Some(ReasoningEffort::Low);
+        let supported_request = supported
+            .apply_defaults(supported_input)
+            .expect("supported Fireworks defaults");
+        let supported_wire = serde_json::to_value(supported_request).unwrap();
+        assert_eq!(supported_wire["reasoning_effort"], "low");
+        assert_eq!(supported_wire["service_tier"], "priority");
+
+        let mut unsupported_config = minimal_config();
+        unsupported_config.provider = ModelProvider::Fireworks;
+        let unsupported = SamplingClient::new(unsupported_config).expect("Fireworks client");
+        let mut unsupported_input = ChatCompletionRequest::new("test-model", Vec::new());
+        unsupported_input.reasoning_effort = Some(ReasoningEffort::High);
+        let unsupported_request = unsupported
+            .apply_defaults(unsupported_input)
+            .expect("unsupported Fireworks defaults");
+        assert_eq!(unsupported_request.reasoning_effort, None);
     }
 
     #[test]

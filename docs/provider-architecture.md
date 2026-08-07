@@ -43,7 +43,11 @@ refreshes credentials. The Kimi adapter uses ordinary Chat Completions and
 removes sampling fields owned by Kimi coding models; it does not advertise a
 hosted-tool dialect. The Fireworks AI adapter is a plain Chat Completions
 transport: standard sampling fields pass through unchanged and no hosted-tool
-dialect is advertised. Fireworks exposes a curated model list; its `/models`
+dialect is advertised. Curated Fireworks reasoning models expose the provider's
+common `low`/`medium`/`high` Chat Completions effort controls and the
+`priority` service tier used by `/fast`, including fast router variants;
+models without an explicit capability remain fail-closed.
+Fireworks exposes a curated model list; its `/models`
 endpoint may enrich curated entries (context window) but can neither add nor
 remove models. The DeepSeek adapter keeps V4 Pro on Chat Completions and routes
 `deepseek-v4-flash` through DeepSeek's stateless Responses dialect. It
